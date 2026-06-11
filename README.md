@@ -29,7 +29,7 @@ Or manually: copy any directory under `skills/` into `~/.claude/skills/` (Claude
 ## Compatibility
 
 - macOS paths throughout (the storage locations are platform-specific; Linux equivalents are noted where known).
-- Recipes use `jq`, `sqlite3`, and `python3` — all preinstalled or one `brew install` away.
+- The skills teach the storage data models and compose queries from built-in tools (`jq`, `sqlite3`, `grep`) rather than bundling helper scripts — agents can adapt the recipes to any question.
 - All database access is read-only.
 
 ## License

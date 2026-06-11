@@ -1,8 +1,8 @@
 ---
 name: exploring-claude-sessions
 description: Finds and explores Claude Code session history stored locally as JSONL transcripts. Use when the user asks to find, search, read, export, or resume a past Claude Code session, conversation, or transcript, or to see what a previous Claude Code session did.
-compatibility: Requires jq and python3. Paths are macOS/Linux (~/.claude).
-allowed-tools: Bash(jq *) Bash(python3 *) Bash(ls *) Bash(grep *)
+compatibility: Requires jq. Paths are macOS/Linux (~/.claude).
+allowed-tools: Bash(jq *) Bash(ls *) Bash(grep *)
 metadata:
   author: jlreyes
 ---
