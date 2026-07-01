@@ -10,6 +10,8 @@
 
 Each skill teaches an agent how to locate session files, decode the storage schema, and run verified recipes: list recent sessions, search across all history by keyword, dump a full transcript as readable markdown, and resume a found session.
 
+Each skill is `SKILL.md` (recipes) + `data-model.md` (full current schema) + `references/` (archived snapshots of `data-model.md` from before each prior schema change). Session files already on disk were written by whatever tool version was current at the time and don't retroactively upgrade, so old schemas stay around as references instead of being overwritten — if a transcript doesn't match the current `data-model.md`, check `references/` for one that does.
+
 Typical uses: "what did I ask Cursor to do in that session last week?", auditing an agent's past work, exporting a transcript for review, or building tooling on top of local agent history.
 
 ## Install
@@ -43,13 +45,14 @@ skill still needs an occasional manual re-verification pass on a machine
 with the Cursor app installed.
 
 A second job (`propose-update`) runs only when drift is detected **and** an
-`ANTHROPIC_API_KEY` repo secret is configured: it invokes
-[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)
-headlessly to re-verify the changed CLI(s) against real, freshly-installed
-binaries (not memory) and open a PR updating the affected skill's
-`SKILL.md`, `data-model.md`, and `tracked-versions.json` together — review
-it before merging, same as any other PR. Without the secret, only the
-tracking issue fires and resolving it stays manual.
+`ANTHROPIC_API_KEY` repo secret is configured: it fans out one subagent per
+affected skill (via `anthropics/claude-code-action`, headlessly) to
+re-verify against real, freshly-installed binaries (not memory), archive
+the pre-change `data-model.md` into `references/` before overwriting it if
+the change is a genuine format change, and open a single PR updating
+whichever skill(s) actually needed it plus `tracked-versions.json` — review
+before merging, same as any other PR. Without the secret, only the tracking
+issue fires and resolving it stays manual.
 
 Two more secrets unlock deeper verification for two of the three skills:
 

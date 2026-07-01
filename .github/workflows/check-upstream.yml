@@ -84,6 +84,11 @@ jobs:
     needs: check
     if: needs.check.outputs.drift == 'true'
     runs-on: ubuntu-latest
+    # Real backstop on cost/wall-clock, replacing a guessed --max-turns:
+    # this job fans out one subagent per affected skill (see the prompt
+    # below), so a per-turn cap on the orchestrating agent doesn't actually
+    # bound total work. A generous but finite job timeout does.
+    timeout-minutes: 90
     permissions:
       contents: write
       pull-requests: write
@@ -123,20 +128,24 @@ jobs:
         if: env.ANTHROPIC_API_KEY != ''
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Scaffolded 2026-07-01 against anthropics/claude-code-action's
-      # documented automation mode (same approach as ts-tips's
-      # check-upstream.yml propose-update job); not yet exercised by a real
-      # run — treat the first actual trigger as the real test of this job,
-      # and tighten claude_args/prompt from there. The action commits and
-      # opens the PR itself once Claude edits files — it doesn't need git/gh
-      # in its allowlist for that part.
+      # Scaffolded 2026-07-01, revised same day to fan out per-skill
+      # subagents (mirroring how these skills are actually maintained by
+      # hand — see git log) instead of one linear pass. Against
+      # anthropics/claude-code-action's documented automation mode; not yet
+      # exercised by a real scheduled run — treat the first actual trigger
+      # as the real test of this job. The action commits and opens the PR
+      # itself once Claude edits files — it doesn't need git/gh in its
+      # allowlist for that part. Tool access is intentionally broad (not
+      # scoped to specific Bash commands): this runs in an ephemeral,
+      # repo-scoped GitHub-hosted container with no access beyond the
+      # secrets explicitly passed in, and the output is a PR a human reviews
+      # before merging, so there's little to gain from narrowing it further.
       - uses: anthropics/claude-code-action@v1
         if: env.ANTHROPIC_API_KEY != ''
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: |
-            --allowedTools "Read,Edit,WebFetch,WebSearch,Bash(claude *),Bash(codex *),Bash(agent *),Bash(cursor-agent *),Bash(jq *),Bash(sqlite3 *),Bash(find *),Bash(grep *),Bash(rg *),Bash(ls *),Bash(cat *)"
-            --max-turns 75
+            --allowedTools "Read,Edit,Write,Bash,WebFetch,WebSearch,Agent"
           prompt: |
             The following upstream CLI versions changed, detected by a diff
             against .github/tracked-versions.json:
@@ -147,44 +156,82 @@ jobs:
             how to explore local conversation history for Claude Code, Codex
             CLI, and Cursor, via skills/exploring-claude-sessions,
             skills/exploring-codex-sessions, and skills/exploring-cursor-history
-            respectively — each is a SKILL.md (recipes + quick reference) plus
-            a data-model.md (full schema, verified against a specific CLI
-            version and date).
+            respectively — each is a SKILL.md (recipes + quick reference), a
+            data-model.md (full schema, verified against a specific CLI
+            version and date), and a references/ directory of archived
+            historical schema snapshots (old transcripts on disk don't
+            retroactively upgrade, so old schemas stay documented rather
+            than being overwritten).
 
-            For each tool whose version changed above, re-verify its skill
-            against REALITY, not memory or the summary above:
+            Work out which of the three skills are affected by the version
+            changes above. Spawn one subagent per affected skill with the
+            Agent tool, all in parallel, each fully self-contained (it won't
+            see this prompt or this repo's history) with at least the
+            following checklist:
 
-            1. Actually run the installed CLI (--help, --version). For Codex
-               and Cursor, also run a real headless prompt —
-               `codex exec "..."` / `agent -p "..." --output-format json
-               --force` — ONLY if OPENAI_API_KEY / CURSOR_API_KEY are set in
-               this environment (check with e.g. `[ -n "$OPENAI_API_KEY" ]`);
-               if a credential is missing, skip live-exercising that tool,
-               rely on --help/docs instead, and say so plainly in the PR
-               description rather than guessing at behavior you didn't
-               observe.
-            2. You ARE Claude Code, running as yourself — for
-               exploring-claude-sessions you can inspect your own current
-               session transcript under ~/.claude/projects/ mid-run as direct
-               ground truth for the current schema, in addition to checking
-               code.claude.com/docs.
-            3. Diff the real on-disk paths/fields/recipes against
-               skills/<tool>/data-model.md and the matching SKILL.md. Run
-               every recipe in the SKILL.md against real local data, don't
-               just read them.
-            4. Update both files to match reality. Bump the "Verified
-               against/on ..." line in data-model.md to the new version and
-               today's date. Keep the terse, source-verified, "index not
-               tutorial" tone and existing structure — don't restructure
-               sections that are still accurate, and don't add speculative
-               content you couldn't verify.
-            5. Update .github/tracked-versions.json's matching field(s) to
-               what you just verified.
+            1. Read that skill's current SKILL.md, data-model.md, and
+               references/ directory in full first.
+            2. Actually run the installed CLI — --help and every subcommand
+               --help relevant to session storage, --version — and diff
+               against what's documented. Don't rely on memory.
+            3. `ls -la` the tool's real storage directory (~/.claude,
+               ~/.codex, or ~/Library/Application Support/Cursor +
+               ~/.cursor) and diff against the documented directory layout.
+            4. Enumerate every distinct entry-type / event-type / field
+               actually present in fresh real local data (grep/jq the raw
+               files, or query the real DB) and diff against the documented
+               enums and field tables — don't just spot-check a couple of
+               examples.
+            5. Re-run every single recipe in SKILL.md against real local
+               data. Fix any that error or produce wrong-looking output.
+            6. If OPENAI_API_KEY / CURSOR_API_KEY are set in the environment
+               (check with e.g. `[ -n "$OPENAI_API_KEY" ]`), run a real
+               headless prompt through that tool's CLI (`codex exec "..."` /
+               `agent -p "..." --output-format json --force`) to generate
+               fresh, guaranteed-current example data. If a credential is
+               missing, skip live-exercising that one tool, rely on
+               --help/docs instead, and say so plainly rather than guessing
+               at behavior you didn't observe. (For Claude Code itself, no
+               credential check is needed — you ARE Claude Code, so your own
+               current session transcript under ~/.claude/projects/ is
+               direct ground truth, readable mid-run.)
+            7. Cross-check the official docs and, where possible, the tool's
+               real source/release/PR history (e.g. `gh pr list --search ...
+               --repo openai/codex`-style corroboration) for the specific
+               version range since this skill was last verified — don't just
+               trust a changelog's prose summary.
+            8. Before overwriting data-model.md: decide whether this is a
+               genuine schema/format change (old on-disk files really do use
+               the old shape — a field or entry type was renamed, removed,
+               or restructured) versus a pure documentation correction (the
+               old doc was just wrong and never matched any real on-disk
+               data). For a genuine format change ONLY: copy the CURRENT
+               data-model.md content verbatim into
+               references/<tool-version-anchor>.md first (match the
+               archival-banner template already used by the existing files
+               in that directory), then update the live data-model.md and
+               its "older transcript?" pointer paragraph to reference the
+               new archive. No diffing needed — a full snapshot copy is
+               enough. Skip this step for pure corrections; those just get
+               fixed in place.
+            9. Update SKILL.md and data-model.md to match reality. Bump the
+               "Verified against/on ..." line and date. Keep the terse,
+               source-verified, "index not tutorial" tone and existing
+               structure — don't restructure sections that are still
+               accurate, and don't add speculative content you couldn't
+               verify.
+            10. Report back: (a) what you corrected, with evidence, (b) what
+                you newly documented, (c) what you explicitly confirmed as
+                still-accurate and left alone, (d) anything you noticed but
+                deliberately didn't change, and why.
 
-            If a tool's version changed but you can't find any actual schema
-            or behavior difference after checking, it's fine to leave its
-            skill files untouched — just say so in the PR description. Open
-            a single PR covering whichever skill(s) actually needed changes.
-            Cite what you actually ran (commands, doc URLs) in the PR
-            description so a human reviewer can spot-check without redoing
-            your work.
+            Once all subagents finish, update .github/tracked-versions.json
+            to the versions you just verified, and open a single PR covering
+            whichever skill(s) actually needed changes — synthesize the
+            subagents' reports into the PR description (what changed in each
+            skill and why), citing what was actually run/checked so a human
+            reviewer can spot-check without redoing the work. If a tool's
+            version changed but its subagent found no actual schema or
+            behavior difference, it's fine to leave that skill's files
+            untouched — say so in the PR description instead of forcing a
+            change.
