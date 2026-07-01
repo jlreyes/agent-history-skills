@@ -145,6 +145,25 @@ jobs:
         if: env.ANTHROPIC_API_KEY != ''
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Without these, the log jumps straight from the echoed prompt to
+          # a single final cost line -- the entire run is a black box, only
+          # inspectable after the fact via total_cost_usd. show_full_output
+          # surfaces Claude's full turn-by-turn JSON (tool calls, results,
+          # thinking) into the step log; display_report adds a rendered
+          # summary to the GitHub Step Summary UI. Confirmed via action.yml:
+          # track_progress (live-updating PR/issue comments) does NOT apply
+          # here -- it's explicitly restricted to pull_request/issue trigger
+          # events, not workflow_dispatch/schedule.
+          # Tradeoff, deliberately accepted: show_full_output's own warning
+          # is that tool outputs "may contain secrets... publicly visible in
+          # GitHub Actions" (this repo is public). GitHub auto-masks the
+          # literal value of any registered `secrets.*` used in this job
+          # (confirmed in run 28541797102's log: ANTHROPIC_API_KEY/
+          # OPENAI_API_KEY/CURSOR_API_KEY all rendered as `***`), which
+          # covers the realistic risk here -- there's no other sensitive
+          # data in this repo's content. Revisit if that stops being true.
+          show_full_output: true
+          display_report: true
           claude_args: |
             --allowedTools "Read,Edit,Write,Bash,WebFetch,WebSearch,Agent"
           prompt: |
