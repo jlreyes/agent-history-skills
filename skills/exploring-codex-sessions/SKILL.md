@@ -21,6 +21,7 @@ Codex CLI stores every session ("thread") as a JSONL rollout file under `$CODEX_
 | `~/.codex/state_5.sqlite` | `threads` table: metadata index (cwd, preview, title, git info, archived flag). Treat as cache — rebuilt from rollouts |
 | `~/.codex/session_index.jsonl` | Thread names: `{"id", "thread_name", "updated_at"}`, last entry wins |
 | `~/.codex/config.toml` | `[history] persistence = "save-all"\|"none"` |
+| `~/.codex/external_agent_session_imports.json` | Manifest of rollouts transcoded from another agent's history (seen: Claude Code). No marker inside the rollout itself — cross-reference this file |
 
 Sessions are **never auto-deleted**. Cold rollouts may be zstd-compressed to `.jsonl.zst` (feature-flagged; read with `zstdcat`). `CODEX_HOME` env var relocates everything.
 
@@ -28,13 +29,13 @@ Sessions are **never auto-deleted**. Cold rollouts may be zstd-compressed to `.j
 
 Every line: `{"timestamp": "<UTC RFC3339>", "type": "<tag>", "payload": {...}}` with five tags — full detail in [data-model.md](data-model.md):
 
-- `session_meta` — line 1: `id`, `cwd`, `cli_version`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `git{branch, commit_hash, repository_url}`, `forked_from_id`
-- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `reasoning` (encrypted), `web_search_call`
+- `session_meta` — line 1: `id`, `session_id` (duplicate of `id`, added 0.142.x), `cwd`, `cli_version`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `originator` (`codex-tui`, or `Codex Desktop` for the desktop app), `git{branch, commit_hash, repository_url}`, `forked_from_id`
+- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `reasoning` (encrypted), `web_search_call`, `tool_search_call`(+`_output`) (on-demand MCP tool discovery, 0.142.x+)
 - `event_msg` — UI events: `user_message` (**authoritative record of what the user typed**), `agent_message` (`phase`: `"commentary"` stream vs final), `task_complete` (`last_agent_message`), `token_count`, `turn_aborted`
-- `turn_context` — per-turn snapshot: `model`, `cwd`, `approval_policy`, `sandbox_policy`
-- `compacted` — compaction marker; `replacement_history[]` substitutes prior history on replay
+- `turn_context` — per-turn snapshot: `model`, `cwd`, `approval_policy`, `sandbox_policy` (plus many more fields by 0.137.x — see data-model.md)
+- `compacted` — compaction marker; `replacement_history[]` substitutes prior history on replay (0.142.x+ adds a `window_id`/`window_number` lineage chaining successive compactions)
 
-**Pitfall**: `response_item` user messages include injected context. Skip texts starting with `<user_instructions>`, `<environment_context>`, `<permissions`, `<collaboration_mode>`, `<apps_instructions>`, or `# AGENTS.md`. Prefer `event_msg`/`user_message` for the human's words.
+**Pitfall**: `response_item` messages (`user` or `developer` role) include injected context. Skip texts starting with `<user_instructions>`, `<environment_context>`, `<permissions`, `<collaboration_mode>`, `<apps_instructions>`, `<plugins_instructions>`, `<skills_instructions>`, `<environment>`, `<environment-change>`, `<app-context>`, or `# AGENTS.md`. Prefer `event_msg`/`user_message` for the human's words.
 
 ## Recipes
 
@@ -99,3 +100,4 @@ The `codex resume` picker filters to the **current cwd** and interactive sources
 - Filename timestamps are local time; in-file timestamps are UTC — a late-evening session can sit in the "wrong" date directory.
 - Subagent/review/compact threads have object-valued `source` in `session_meta`; filter on it to separate human sessions from automation.
 - There is no `codex history` subcommand — `history.jsonl` plus the recipes above are the interface.
+- Some rollouts under `sessions/` may be transcoded imports from another agent's local history (observed: Claude Code, via `~/.claude/projects/**/*.jsonl`) rather than native Codex sessions. They use the normal envelope with no in-file marker — if content looks out of place (e.g. slash-command syntax from another tool), check `~/.codex/external_agent_session_imports.json`.

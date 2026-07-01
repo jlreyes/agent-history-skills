@@ -17,22 +17,26 @@ Claude Code stores every session as a JSONL transcript (one JSON object per line
 |------|---------------|
 | `~/.claude/projects/<project-slug>/<session-id>.jsonl` | Main session transcripts |
 | `~/.claude/projects/<project-slug>/<session-id>/subagents/agent-*.jsonl` | Subagent transcripts (same schema), with `agent-*.meta.json` (agent type, description) |
-| `~/.claude/projects/<project-slug>/.session-aliases` | User-set session names → session IDs |
+| `~/.claude/projects/<project-slug>/<session-id>/tool-results/` | Large tool outputs offloaded out of the JSONL |
+| `~/.claude/projects/<project-slug>/.session-aliases` | Other project paths cross-linked via `/add-dir` — **not** name→id aliases (session names live in `agent-name` transcript entries; see data-model.md) |
 | `~/.claude/projects/<project-slug>/memory/` | Per-project auto-memory (markdown) |
-| `~/.claude/history.jsonl` | Global prompt history: `{display, timestamp(ms), project}` per line |
+| `~/.claude/history.jsonl` | Global prompt history: `{display, timestamp(ms), project, sessionId}` per line |
 | `~/.claude/file-history/<session-id>/` | File snapshots backing checkpoint/undo |
+| `~/.claude/tasks/<session-id>/<n>.json` | Structured per-session task list (subject/status/blocks) |
+| `~/.claude/sessions/<pid>.json` | Live registry of running/recent processes (backs `claude agents`) |
 
-**Project slug encoding**: the session's working directory with `/` replaced by `-`. `/Users/me/repos/Foo` → `-Users-me-repos-Foo`.
+**Project slug encoding**: the session's working directory with `/` replaced by `-`. `/Users/me/repos/Foo` → `-Users-me-repos-Foo`. **Exception**: a session started with `-w`/`--worktree` files its transcript under the *original* repo's slug, not the worktree path's slug — don't assume slug == current `cwd`.
 
-**Retention**: transcripts are auto-cleaned after 30 days by default (`cleanupPeriodDays` in `~/.claude/settings.json`). `history.jsonl` is never auto-cleaned.
+**Retention**: transcripts are auto-cleaned after 30 days by default (`cleanupPeriodDays` in `~/.claude/settings.json`). `history.jsonl` is never auto-cleaned. To delete a project's history outright, `claude project purge <path>` (supports `--dry-run`) is the built-in way — more thorough than hand-deleting files.
 
 ## Transcript schema (quick reference)
 
-Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `file-history-snapshot`, `mode`, `permission-mode`, `system`, `summary`. Full field tables and examples: [data-model.md](data-model.md).
+Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `file-history-snapshot`, `mode`, `permission-mode`, `system` (subtypes include `compact_boundary`, the current compaction marker — a standalone `summary` type was not found in any current transcript), `queue-operation`, `agent-name`, `pr-link`, `worktree-state`, `agent-setting`. Full field tables and examples: [data-model.md](data-model.md).
 
 The fields needed for most exploration:
 
 - `user` / `assistant` entries: `.timestamp` (ISO 8601), `.sessionId`, `.cwd`, `.gitBranch`, `.message.content` (string **or** array of blocks: `text`, `thinking`, `tool_use`, `tool_result`), `.uuid` / `.parentUuid` (conversation chain), `.isSidechain` (subagent work)
+- `user` entries only: `.origin.kind` (`"human"` vs `"task-notification"`) — the reliable signal for "did a person actually type this"
 - `ai-title` entries: `.aiTitle` — the generated session title
 - `assistant` entries: `.message.model`, `.message.usage` (token counts)
 
@@ -105,14 +109,15 @@ ls ~/.claude/projects/*/SESSION_PREFIX*.jsonl 2>/dev/null
 ```bash
 claude --resume <session-id>     # by ID (or saved name)
 claude --continue                # most recent session in current directory
+claude --resume <session-id> --fork-session   # resume into a NEW session ID, leave the original untouched
 ```
 
-In-session: `/resume <id-or-name>`. Export a live session with `/export <file>`.
+In-session: `/resume <id-or-name>`. Export a live session with `/export <file>`. `claude --teleport` pulls a claude.ai/web session into the terminal (requires a claude.ai subscription; real but not listed in `claude --help`). For sessions that are still running or were recently active, `claude agents --json` is a live alternative to grepping transcripts.
 
 ## Tips
 
-- Skip `agent-*.jsonl` and `<session-id>/` subdirectories when listing top-level sessions; those are subagent transcripts.
-- `tool_result` content can be huge — always truncate (`.[:200]`) when printing.
-- The first `user` line of a transcript may be an injected context block rather than the human's prompt; the `last-prompt` entry and `history.jsonl` reflect what was actually typed.
-- Sessions started headless (`claude -p`) are stored too but don't appear in the `/resume` picker.
-- Old `~/.claude/__store.db` (SQLite) is deprecated and no longer written; everything current is JSONL.
+- Skip `agent-*.jsonl` and `<session-id>/` subdirectories when listing top-level sessions; those are subagent transcripts (and `tool-results/` inside them).
+- `tool_result` content can be huge — always truncate (`.[:200]`) when printing. Some tool results are offloaded entirely to `<session-id>/tool-results/*.txt` rather than inlined.
+- The first `user` line of a transcript may be an injected context block rather than the human's prompt; check `.origin.kind == "human"` (most reliable), or fall back to the `last-prompt` entry / `history.jsonl` for what was actually typed.
+- Sessions started headless (`claude -p`) are stored too but don't appear in the `/resume` picker — unless `--no-session-persistence` was passed, in which case they aren't stored at all.
+- Old `~/.claude/__store.db` (SQLite) is deprecated and no longer written; everything current is JSONL. (`~/.claude/sessions/<pid>.json`, despite the similar name, is unrelated and very much current — it's a live process registry, not a deprecated store.)
