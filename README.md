@@ -10,6 +10,8 @@
 
 Each skill teaches an agent how to locate session files, decode the storage schema, and run verified recipes: list recent sessions, search across all history by keyword, dump a full transcript as readable markdown, and resume a found session.
 
+Each skill is `SKILL.md` (recipes) + `data-model.md` (full current schema) + `references/` (archived snapshots of `data-model.md` from before each prior schema change). Session files already on disk were written by whatever tool version was current at the time and don't retroactively upgrade, so old schemas stay around as references instead of being overwritten — if a transcript doesn't match the current `data-model.md`, check `references/` for one that does.
+
 Typical uses: "what did I ask Cursor to do in that session last week?", auditing an agent's past work, exporting a transcript for review, or building tooling on top of local agent history.
 
 ## Install
