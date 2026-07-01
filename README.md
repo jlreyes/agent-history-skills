@@ -26,6 +26,61 @@ npx skills add jlreyes/agent-history-skills
 
 Or manually: copy any directory under `skills/` into `~/.claude/skills/` (Claude Code), `~/.agents/skills/` (open-standard agents), or your agent's equivalent.
 
+## Staying current
+
+A scheduled GitHub Action (`.github/workflows/check-upstream.yml`, weekly)
+installs the current Claude Code, Codex, and Cursor CLIs fresh and diffs
+their `--version` output against `.github/tracked-versions.json`, opening or
+updating a tracking issue when something changed (job: `check`). That part
+is deliberately dumb — no LLM calls, no secrets, no auto-commits — it only
+tells you *that* something shipped a new version.
+
+**Coverage gap**: this only catches CLI drift. `exploring-cursor-history`
+also documents the Cursor **IDE** app's on-disk schema (`composerData`/bubble
+`_v` versions), and GitHub-hosted runners can't install or run a macOS
+desktop GUI app — so an IDE-only schema change won't trip this check. That
+skill still needs an occasional manual re-verification pass on a machine
+with the Cursor app installed.
+
+A second job (`propose-update`) runs only when drift is detected **and** an
+`ANTHROPIC_API_KEY` repo secret is configured: it fans out one subagent per
+affected skill (via `anthropics/claude-code-action`, headlessly) to
+re-verify against real, freshly-installed binaries (not memory), archive
+the pre-change `data-model.md` into `references/` before overwriting it if
+the change is a genuine format change, and open a single PR updating
+whichever skill(s) actually needed it plus `tracked-versions.json` — review
+before merging, same as any other PR. Without the secret, only the tracking
+issue fires and resolving it stays manual.
+
+Two more secrets unlock deeper verification for two of the three skills:
+
+| Secret | Unlocks |
+|---|---|
+| `ANTHROPIC_API_KEY` | Required for the `propose-update` job to run at all |
+| `OPENAI_API_KEY` | Lets the job log in and run a real `codex exec` prompt to verify `exploring-codex-sessions`, instead of relying on `--help` output alone |
+| `CURSOR_API_KEY` | Lets the job run a real `agent -p` prompt to verify `exploring-cursor-history` the same way |
+
+Without `OPENAI_API_KEY` / `CURSOR_API_KEY`, the corresponding skill still
+gets re-verified from `--help`/`--version` output and official docs, just
+not from a live, freshly-generated session — the PR description says which
+mode it ran in for each tool.
+
+**Setting a secret:** run this yourself, in your own terminal — not through
+an agent session, so the key value never passes through anyone's context or
+transcript:
+
+```bash
+gh secret set ANTHROPIC_API_KEY --repo jlreyes/agent-history-skills
+gh secret set OPENAI_API_KEY --repo jlreyes/agent-history-skills
+gh secret set CURSOR_API_KEY --repo jlreyes/agent-history-skills
+# each pastes/prompts for the value interactively; nothing is echoed
+```
+
+This is standard CI-secret hygiene regardless of any agent-visibility policy
+you run elsewhere — `gh secret set` with no `--body` flag reads from a
+hidden prompt, and the value is never visible to anything running inside the
+workflow's logs (GitHub masks it automatically).
+
 ## Compatibility
 
 - macOS paths throughout (the storage locations are platform-specific; Linux equivalents are noted where known).
