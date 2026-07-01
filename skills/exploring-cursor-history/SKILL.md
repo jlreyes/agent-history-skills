@@ -1,7 +1,7 @@
 ---
 name: exploring-cursor-history
-description: Finds and explores Cursor IDE conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, or export a Cursor chat session, agent conversation, composer thread, or transcript.
-compatibility: Requires sqlite3 CLI and jq. macOS only (paths are macOS-specific).
+description: Finds and explores Cursor IDE conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, export, or resume a Cursor chat session, agent conversation, composer thread, or transcript.
+compatibility: Requires sqlite3 CLI and jq. macOS only (paths are macOS-specific). The CLI recipes additionally require the `agent`/`cursor-agent` binary.
 allowed-tools: Bash(sqlite3 *) Bash(jq *)
 metadata:
   author: jlreyes
@@ -9,7 +9,7 @@ metadata:
 
 # Exploring Cursor History
 
-Cursor stores conversations in SQLite databases (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). Query them directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
+Cursor stores IDE conversations in SQLite databases (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). The CLI (`agent`/`cursor-agent`) keeps a separate, per-session SQLite store under `~/.cursor/chats/` — see the CLI recipes below. Query them directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
 
 ## Storage locations (macOS)
 
@@ -17,8 +17,8 @@ Cursor stores conversations in SQLite databases (`state.vscdb`), with the **glob
 |------|---------------|
 | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | All conversation content + metadata (`cursorDiskKV` table). Can be ~1 GB |
 | `~/Library/Application Support/Cursor/User/workspaceStorage/<hash>/state.vscdb` | Legacy per-workspace conversation metadata (stopped updating at Cursor 3.0); `workspace.json` sibling maps hash → folder (`folder` or `workspace` key) |
-| `~/.cursor/projects/<path-slug>/agent-transcripts/<composerId>/<composerId>.jsonl` | **Plaintext JSONL mirror** of IDE agent conversations — easiest grep/export surface |
-| `~/.cursor/chats/<md5>/<agentId>/store.db` | Cursor CLI (`cursor-agent`) sessions |
+| `~/.cursor/projects/<path-slug>/agent-transcripts/<composerId>/<composerId>.jsonl` | **Plaintext JSONL mirror** of agent conversations from both the IDE *and* the CLI — easiest grep/export surface |
+| `~/.cursor/chats/<md5>/<agentId>/{meta.json,store.db}` | Cursor CLI (`agent`/`cursor-agent`) sessions — separate from the global DB, no `composerData`/`bubbleId` rows exist for these. `meta.json` is a lightweight sidecar written as soon as the chat is created; `store.db` (the real transcript) only appears once a message is actually sent |
 | `~/.cursor/plans/*.plan.md` | Plan-mode artifacts (markdown) |
 | `~/.cursor/prompt_history.json` | Rolling array of recent prompts |
 
@@ -124,9 +124,35 @@ jq -r '.role + ": " + (.message.content[0].text // "")' \
   ~/.cursor/projects/<slug>/agent-transcripts/<composerId>/<composerId>.jsonl
 ```
 
+Content blocks can be `{"type":"text","text":"…"}` or `{"type":"tool_use","name":"…","input":{...}}`; a turn with only a tool call has no `content[0].text`, so this one-liner prints a blank line for it (add a `tool_use` fallback if you need those). Files end with a trailing `{"type":"turn_ended","status":"success"}` line.
+
+## List recent Cursor CLI sessions
+
+CLI (`agent`/`cursor-agent`) sessions don't have `composerData` rows — list them via the `meta.json` sidecar instead:
+
+```bash
+for f in ~/.cursor/chats/*/*/meta.json; do
+  jq -r --arg d "$(dirname "$f")" '[(.updatedAtMs/1000|todate), .hasConversation, $d] | @tsv' "$f"
+done | sort -r | head -20
+```
+
+Only covers sessions that have a `meta.json` (added in recent CLI versions — see [data-model.md](data-model.md#the-cursor-tree)); older sessions have `store.db` only, and its `meta` key must be hex-decoded (`SELECT value FROM meta` is a TEXT column holding hex, not a BLOB).
+
+## Resume a session via the CLI
+
+```bash
+agent --resume <chatId> -p "prompt" --output-format json --force   # headless, by ID
+agent --continue -p "prompt" --output-format json --force          # headless, latest for this workspace/cwd
+agent resume                                                        # interactive: latest chat (needs a real TTY)
+agent ls                                                             # interactive: pick from a list (needs a real TTY)
+agent create-chat                                                    # register a new empty chat, print its ID
+```
+
+`resume`/`ls` render an Ink-based picker and fail (`Raw mode is not supported on the current process.stdin`) without a real TTY — only `--resume <chatId>` / `--continue` combined with `-p` are scriptable. Any of these need `--force` (or `--trust`/`--yolo`) once to clear the workspace-trust prompt in a non-interactive shell. `create-chat` only registers the ID server-side — nothing appears under `~/.cursor/chats/` until that ID is actually resumed/messaged, at which point `meta.json` + `store.db` are created together.
+
 ## Tips
 
-- Tool-call turns have empty `text` — render `toolFormerData.name` instead (the legacy `toolResults` field no longer exists).
-- Map a composerId to its project via `workspaceIdentifier.uri.fsPath`, or by which `~/.cursor/projects/<slug>/agent-transcripts/` directory contains it.
+- Tool-call turns have empty `text` — render `toolFormerData.name` instead. (`toolResults`/`suggestedCodeBlocks`/`assistantSuggestedDiffs` are still present as keys on ~99% of bubbles, but always empty arrays — dead fields, not a data source.)
+- Map a composerId to its project via `workspaceIdentifier.uri.fsPath`, or by which `~/.cursor/projects/<slug>/agent-transcripts/` directory contains it — the latter also works for CLI-originated sessions, which have no `composerData`/`bubbleId` rows in the global DB at all.
 - Cloud/background agents (`bc-*` IDs) keep almost nothing locally — transcripts are server-side.
 - A conversation that shows "Chat Too Old" in the UI is still fully readable from the DB; only its server `conversationState` token is lost.
