@@ -93,6 +93,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: read
+      id-token: write # anthropics/claude-code-action needs this to request a GitHub OIDC token
     env:
       # Job-level if: can't reference `secrets` directly (GitHub Actions
       # rejects it: "Unrecognized named-value: 'secrets'" — actions/runner#520).
