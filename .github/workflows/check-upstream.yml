@@ -1,0 +1,190 @@
+name: Check upstream agent CLI versions
+
+on:
+  schedule:
+    - cron: "0 14 * * 1" # every Monday at 14:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      drift: ${{ steps.check.outputs.drift }}
+      summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+
+      # Installers are the official ones (native/curl, not npm — matches how
+      # each tool is actually distributed) and all put a symlink under
+      # ~/.local/bin. continue-on-error means one broken installer doesn't
+      # block detecting drift in the other two; check-versions.mjs falls
+      # back to the previous tracked value for whichever CLI it can't find.
+      - name: Install Claude Code CLI
+        run: curl -fsSL https://claude.ai/install.sh | bash
+        continue-on-error: true
+
+      - name: Install Codex CLI
+        run: curl -fsSL https://chatgpt.com/codex/install.sh | sh
+        env:
+          CODEX_NON_INTERACTIVE: "1"
+        continue-on-error: true
+
+      - name: Install Cursor CLI
+        run: curl https://cursor.com/install -fsS | bash
+        continue-on-error: true
+
+      - name: Put installed CLIs on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check installed versions against tracked-versions.json
+        id: check
+        run: node .github/scripts/check-versions.mjs
+
+      - name: Open or update tracking issue
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.check.outputs.summary }}
+        run: |
+          TITLE="Upstream agent CLI versions changed"
+          BODY="New CLI versions detected by the scheduled check:
+
+          ${SUMMARY}
+
+          This only diffs installed \`--version\` output against
+          \`.github/tracked-versions.json\` — it does not by itself edit any
+          skill content. If an \`ANTHROPIC_API_KEY\` repo secret is
+          configured, a draft PR re-verifying and updating the affected
+          skill(s) should follow shortly (the \`propose-update\` job in the
+          same workflow run) — review it before merging. If no such PR shows
+          up, that secret isn't set; resolve manually instead: exercise the
+          relevant CLI for real, re-verify its on-disk schema against
+          skills/*/data-model.md and the matching SKILL.md, and update
+          \`tracked-versions.json\`, in the same commit/PR.
+
+          _Opened automatically by \`.github/workflows/check-upstream.yml\`._"
+
+          EXISTING=$(gh issue list --state open --json number,title \
+            --jq ".[] | select(.title == \"${TITLE}\") | .number" | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+  propose-update:
+    needs: check
+    if: needs.check.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+    env:
+      # Job-level if: can't reference `secrets` directly (GitHub Actions
+      # rejects it: "Unrecognized named-value: 'secrets'" — actions/runner#520).
+      # Piping through env: and checking that per-step is the documented
+      # workaround (same pattern as ts-tips's check-upstream.yml).
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+    steps:
+      - name: Skip notice if no API key configured
+        if: env.ANTHROPIC_API_KEY == ''
+        run: echo "No ANTHROPIC_API_KEY secret configured — skipping automated update proposal. The tracking issue from the check job still has the manual-resolution steps. See README.md 'Staying current' to enable this job."
+
+      - uses: actions/checkout@v4
+        if: env.ANTHROPIC_API_KEY != ''
+
+      - name: Install Claude Code CLI
+        if: env.ANTHROPIC_API_KEY != ''
+        run: curl -fsSL https://claude.ai/install.sh | bash
+
+      - name: Install and authenticate Codex CLI
+        if: env.ANTHROPIC_API_KEY != '' && env.OPENAI_API_KEY != ''
+        run: |
+          curl -fsSL https://chatgpt.com/codex/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          printenv OPENAI_API_KEY | "$HOME/.local/bin/codex" login --with-api-key
+
+      - name: Install Cursor CLI
+        if: env.ANTHROPIC_API_KEY != '' && env.CURSOR_API_KEY != ''
+        run: curl https://cursor.com/install -fsS | bash
+
+      - name: Put installed CLIs on PATH
+        if: env.ANTHROPIC_API_KEY != ''
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Scaffolded 2026-07-01 against anthropics/claude-code-action's
+      # documented automation mode (same approach as ts-tips's
+      # check-upstream.yml propose-update job); not yet exercised by a real
+      # run — treat the first actual trigger as the real test of this job,
+      # and tighten claude_args/prompt from there. The action commits and
+      # opens the PR itself once Claude edits files — it doesn't need git/gh
+      # in its allowlist for that part.
+      - uses: anthropics/claude-code-action@v1
+        if: env.ANTHROPIC_API_KEY != ''
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --allowedTools "Read,Edit,WebFetch,WebSearch,Bash(claude *),Bash(codex *),Bash(agent *),Bash(cursor-agent *),Bash(jq *),Bash(sqlite3 *),Bash(find *),Bash(grep *),Bash(rg *),Bash(ls *),Bash(cat *)"
+            --max-turns 75
+          prompt: |
+            The following upstream CLI versions changed, detected by a diff
+            against .github/tracked-versions.json:
+
+            ${{ needs.check.outputs.summary }}
+
+            This repo (jlreyes/agent-history-skills) teaches AI coding agents
+            how to explore local conversation history for Claude Code, Codex
+            CLI, and Cursor, via skills/exploring-claude-sessions,
+            skills/exploring-codex-sessions, and skills/exploring-cursor-history
+            respectively — each is a SKILL.md (recipes + quick reference) plus
+            a data-model.md (full schema, verified against a specific CLI
+            version and date).
+
+            For each tool whose version changed above, re-verify its skill
+            against REALITY, not memory or the summary above:
+
+            1. Actually run the installed CLI (--help, --version). For Codex
+               and Cursor, also run a real headless prompt —
+               `codex exec "..."` / `agent -p "..." --output-format json
+               --force` — ONLY if OPENAI_API_KEY / CURSOR_API_KEY are set in
+               this environment (check with e.g. `[ -n "$OPENAI_API_KEY" ]`);
+               if a credential is missing, skip live-exercising that tool,
+               rely on --help/docs instead, and say so plainly in the PR
+               description rather than guessing at behavior you didn't
+               observe.
+            2. You ARE Claude Code, running as yourself — for
+               exploring-claude-sessions you can inspect your own current
+               session transcript under ~/.claude/projects/ mid-run as direct
+               ground truth for the current schema, in addition to checking
+               code.claude.com/docs.
+            3. Diff the real on-disk paths/fields/recipes against
+               skills/<tool>/data-model.md and the matching SKILL.md. Run
+               every recipe in the SKILL.md against real local data, don't
+               just read them.
+            4. Update both files to match reality. Bump the "Verified
+               against/on ..." line in data-model.md to the new version and
+               today's date. Keep the terse, source-verified, "index not
+               tutorial" tone and existing structure — don't restructure
+               sections that are still accurate, and don't add speculative
+               content you couldn't verify.
+            5. Update .github/tracked-versions.json's matching field(s) to
+               what you just verified.
+
+            If a tool's version changed but you can't find any actual schema
+            or behavior difference after checking, it's fine to leave its
+            skill files untouched — just say so in the PR description. Open
+            a single PR covering whichever skill(s) actually needed changes.
+            Cite what you actually ran (commands, doc URLs) in the PR
+            description so a human reviewer can spot-check without redoing
+            your work.
