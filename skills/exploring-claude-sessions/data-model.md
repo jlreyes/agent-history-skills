@@ -2,6 +2,12 @@
 
 Verified against Claude Code 2.1.197 by inspecting real transcripts (100+ sessions across many projects) and the official docs (code.claude.com/docs). Last verified 2026-07-01.
 
+> Transcripts already on disk were written by whatever version was current
+> at the time — they don't retroactively upgrade. If a transcript looks
+> like it doesn't match the schema below, it may predate this verification;
+> see [references/claude-code-2.1.x.md](references/claude-code-2.1.x.md)
+> for the schema as it stood before the 2026-07-01 refresh.
+
 ## Contents
 
 - [Directory layout](#directory-layout)

@@ -2,6 +2,13 @@
 
 Verified against codex-cli 0.137.x (2026-06) and re-verified against 0.142.4 (2026-07-01): real rollout files spanning Sept 2025 → Jul 2026, the `openai/codex` source (rollout crate, protocol types), and `openai/codex` release/PR history. JSONL rollouts are ground truth; `state_5.sqlite` is a rebuildable cache.
 
+> Rollouts already on disk were written by whatever version was current at
+> the time — they don't retroactively upgrade. If a rollout looks like it
+> doesn't match the schema below, it may predate this verification; see
+> [references/codex-cli-0.137.x.md](references/codex-cli-0.137.x.md) for
+> the schema as it stood before the 2026-07-01 refresh (also see "Format
+> eras" below, which covers drift within a single reference's lifetime).
+
 ## Contents
 
 - [Directory layout](#directory-layout)
