@@ -28,13 +28,14 @@ Claude Code stores every session as a JSONL transcript (one JSON object per line
 
 ## Transcript schema (quick reference)
 
-Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `file-history-snapshot`, `mode`, `permission-mode`, `system`, `summary`. Full field tables and examples: [data-model.md](data-model.md).
+Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `queue-operation`, `file-history-snapshot`, `mode`, `permission-mode`, `system`, `summary`. Full field tables and examples: [data-model.md](data-model.md).
 
 The fields needed for most exploration:
 
 - `user` / `assistant` entries: `.timestamp` (ISO 8601), `.sessionId`, `.cwd`, `.gitBranch`, `.message.content` (string **or** array of blocks: `text`, `thinking`, `tool_use`, `tool_result`), `.uuid` / `.parentUuid` (conversation chain), `.isSidechain` (subagent work)
 - `ai-title` entries: `.aiTitle` — the generated session title
 - `assistant` entries: `.message.model`, `.message.usage` (token counts)
+- tool-result `user` entries also have `.toolUseResult` (structured result) and `.sourceToolAssistantUUID` (the `assistant` `tool_use` they answer); sidechain lines carry `.agentId` / `.attributionAgent`
 
 ## Recipes
 
@@ -105,6 +106,8 @@ ls ~/.claude/projects/*/SESSION_PREFIX*.jsonl 2>/dev/null
 ```bash
 claude --resume <session-id>     # by ID (or saved name)
 claude --continue                # most recent session in current directory
+claude --resume <id> --fork-session   # reopen under a NEW session ID (don't mutate original)
+claude --from-pr <n>             # resume the session linked to a PR
 ```
 
 In-session: `/resume <id-or-name>`. Export a live session with `/export <file>`.
@@ -115,4 +118,5 @@ In-session: `/resume <id-or-name>`. Export a live session with `/export <file>`.
 - `tool_result` content can be huge — always truncate (`.[:200]`) when printing.
 - The first `user` line of a transcript may be an injected context block rather than the human's prompt; the `last-prompt` entry and `history.jsonl` reflect what was actually typed.
 - Sessions started headless (`claude -p`) are stored too but don't appear in the `/resume` picker.
-- Old `~/.claude/__store.db` (SQLite) is deprecated and no longer written; everything current is JSONL.
+- `~/.claude/history.jsonl` and `file-history/` only exist once interactive/typed use has written them; a fresh or headless (`-p` / `claude-code-github-action`) machine may not have them yet — fall back to the transcripts under `projects/` and grep `.message.content`.
+- `~/.claude/sessions/<pid>.json` is the live-process registry (one file per running session), not a transcript — don't parse it as JSONL. Old `~/.claude/__store.db` (SQLite) is deprecated and no longer written; everything current is JSONL.

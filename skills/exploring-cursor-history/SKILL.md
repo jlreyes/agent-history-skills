@@ -1,7 +1,7 @@
 ---
 name: exploring-cursor-history
-description: Finds and explores Cursor IDE conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, or export a Cursor chat session, agent conversation, composer thread, or transcript.
-compatibility: Requires sqlite3 CLI and jq. macOS only (paths are macOS-specific).
+description: Finds and explores Cursor IDE and Cursor CLI (agent / cursor-agent) conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, or export a Cursor chat session, agent conversation, composer thread, or transcript.
+compatibility: Requires sqlite3 CLI and jq. macOS/Linux/Windows — path roots differ per platform (see table below); recipes shown for macOS, adjust the root.
 allowed-tools: Bash(sqlite3 *) Bash(jq *)
 metadata:
   author: jlreyes
@@ -9,16 +9,18 @@ metadata:
 
 # Exploring Cursor History
 
-Cursor stores conversations in SQLite databases (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). Query them directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
+Two separate stores: the **IDE / desktop app** (SQLite `state.vscdb`, with the **global DB as the single source of truth** — workspace DBs only hold legacy pre-3.0 metadata) and the **CLI `agent`** (`cursor-agent`) which keeps per-session `store.db` files under its own XDG config dir. Both also drop a plaintext JSONL transcript mirror under `~/.cursor/projects/`. Query DBs directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
 
-## Storage locations (macOS)
+## Storage locations
+
+Two path roots. **IDE app-data root**: macOS `~/Library/Application Support/Cursor`, Linux `~/.config/Cursor` (capital C), Windows `%APPDATA%\Cursor`. **CLI config root** (XDG): Linux `~/.config/cursor` (lowercase c), macOS/XDG-unset `~/.cursor`, override with `$CURSOR_CONFIG_DIR`. The recipe table uses macOS roots; substitute for your platform.
 
 | Path | What it holds |
 |------|---------------|
-| `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | All conversation content + metadata (`cursorDiskKV` table). Can be ~1 GB |
-| `~/Library/Application Support/Cursor/User/workspaceStorage/<hash>/state.vscdb` | Legacy per-workspace conversation metadata (stopped updating at Cursor 3.0); `workspace.json` sibling maps hash → folder (`folder` or `workspace` key) |
-| `~/.cursor/projects/<path-slug>/agent-transcripts/<composerId>/<composerId>.jsonl` | **Plaintext JSONL mirror** of IDE agent conversations — easiest grep/export surface |
-| `~/.cursor/chats/<md5>/<agentId>/store.db` | Cursor CLI (`cursor-agent`) sessions |
+| `<IDE root>/User/globalStorage/state.vscdb` | All IDE conversation content + metadata (`cursorDiskKV` table). Can be ~1 GB |
+| `<IDE root>/User/workspaceStorage/<hash>/state.vscdb` | Legacy per-workspace conversation metadata (stopped updating at Cursor 3.0); `workspace.json` sibling maps hash → folder (`folder` or `workspace` key) |
+| `~/.cursor/projects/<path-slug>/agent-transcripts/<id>/<id>.jsonl` | **Plaintext JSONL mirror** of agent conversations (IDE composerId or CLI sessionId) — easiest grep/export surface. `~/.cursor` on all platforms |
+| `<CLI config root>/chats/<md5(workspacePath)>/<sessionId>/store.db` | Cursor CLI (`agent`) sessions (+ `meta.json` sibling). Linux: `~/.config/cursor/chats/…` |
 | `~/.cursor/plans/*.plan.md` | Plan-mode artifacts (markdown) |
 | `~/.cursor/prompt_history.json` | Rolling array of recent prompts |
 
@@ -119,10 +121,37 @@ done | sort -t'|' -rn | head -30
 
 ## Plaintext export (no SQLite at all)
 
+Works for both IDE and CLI conversations — `<id>` is the composerId (IDE) or sessionId (CLI). `~/.cursor` on every platform:
+
 ```bash
-jq -r '.role + ": " + (.message.content[0].text // "")' \
-  ~/.cursor/projects/<slug>/agent-transcripts/<composerId>/<composerId>.jsonl
+jq -r 'select(.role) | .role + ": " + (.message.content[0].text // "")' \
+  ~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl
 ```
+
+(The `select(.role)` skips trailing `{"type":"turn_ended",…}` control records.)
+
+## CLI (`agent`) session store
+
+CLI chats live in per-session `store.db` files (Linux root `~/.config/cursor/chats`; macOS `~/.cursor/chats`). Two tables: `meta` (one hex-encoded-JSON row, key `'0'`) and content-addressed `blobs`. List sessions and read them without the interactive `agent ls`/`agent resume` TUIs:
+
+```bash
+CHATS="$HOME/.config/cursor/chats"   # macOS: $HOME/.cursor/chats
+# List sessions: dir mtime + decoded name/mode/createdAt from meta
+for db in "$CHATS"/*/*/store.db; do
+  sqlite3 "file:$db?mode=ro" "SELECT value FROM meta WHERE key='0';" \
+    | xxd -r -p | jq -r '"\(.createdAt)  \(.agentId)  [\(.mode)]  \(.name)"'
+done | sort -rn
+
+# Read a session's messages (JSON blobs only; blobs are unordered — order via JSONL mirror)
+DB="$CHATS/<md5>/<sessionId>/store.db"
+for id in $(sqlite3 "file:$DB?mode=ro" "SELECT id FROM blobs;"); do
+  sqlite3 "file:$DB?mode=ro" "SELECT quote(data) FROM blobs WHERE id='$id';" \
+    | sed "s/^X'//;s/'\$//" | xxd -r -p \
+    | jq -r 'select(.role) | .role + ": " + (if (.content|type)=="string" then .content else ([.content[]|select(.type=="text").text]|join(" ")) end)' 2>/dev/null
+done
+```
+
+The `<md5>` dir is `md5(workspace absolute path)`; the `<sessionId>` matches the `session_id` from `agent -p … --output-format json` and the JSONL transcript dir. For guaranteed chronological order, read the JSONL mirror above instead.
 
 ## Tips
 
@@ -130,3 +159,5 @@ jq -r '.role + ": " + (.message.content[0].text // "")' \
 - Map a composerId to its project via `workspaceIdentifier.uri.fsPath`, or by which `~/.cursor/projects/<slug>/agent-transcripts/` directory contains it.
 - Cloud/background agents (`bc-*` IDs) keep almost nothing locally — transcripts are server-side.
 - A conversation that shows "Chat Too Old" in the UI is still fully readable from the DB; only its server `conversationState` token is lost.
+- CLI `agent ls` / `agent resume` are interactive TUIs (Ink, need a real TTY); they error under `--print`/piped stdin. Read the `store.db` or JSONL mirror directly instead.
+- CLI vs IDE: the IDE writes to `state.vscdb` (`cursorDiskKV`); the CLI writes per-session `store.db` under the XDG config dir. They don't share files — check both when unsure which produced a conversation.

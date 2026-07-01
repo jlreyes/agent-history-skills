@@ -17,24 +17,26 @@ Codex CLI stores every session ("thread") as a JSONL rollout file under `$CODEX_
 |------|---------------|
 | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | Full session transcripts. `<uuid>` is the session/thread ID (UUIDv7, time-sortable). Date dirs use **local** time |
 | `~/.codex/archived_sessions/rollout-*.jsonl` | Archived sessions (flat, via `codex archive`) |
-| `~/.codex/history.jsonl` | Every user-typed prompt across all sessions: `{"session_id", "ts" (unix sec), "text"}` |
+| `~/.codex/history.jsonl` | Prompts typed in **interactive (TUI)** sessions: `{"session_id", "ts" (unix sec), "text"}`. `codex exec` prompts are NOT recorded here — read the rollout instead |
 | `~/.codex/state_5.sqlite` | `threads` table: metadata index (cwd, preview, title, git info, archived flag). Treat as cache — rebuilt from rollouts |
+| `~/.codex/{goals_1,memories_1,logs_2}.sqlite` | Sibling caches (goals/memory/telemetry), also rebuildable — not session ground truth |
 | `~/.codex/session_index.jsonl` | Thread names: `{"id", "thread_name", "updated_at"}`, last entry wins |
-| `~/.codex/config.toml` | `[history] persistence = "save-all"\|"none"` |
+| `~/.codex/config.toml` | `[history] persistence = "save-all"` (default) `\| "none"` |
 
 Sessions are **never auto-deleted**. Cold rollouts may be zstd-compressed to `.jsonl.zst` (feature-flagged; read with `zstdcat`). `CODEX_HOME` env var relocates everything.
 
 ## Rollout schema (quick reference)
 
-Every line: `{"timestamp": "<UTC RFC3339>", "type": "<tag>", "payload": {...}}` with five tags — full detail in [data-model.md](data-model.md):
+Every line: `{"timestamp": "<UTC RFC3339>", "type": "<tag>", "payload": {...}}` with six tags — full detail in [data-model.md](data-model.md):
 
-- `session_meta` — line 1: `id`, `cwd`, `cli_version`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `git{branch, commit_hash, repository_url}`, `forked_from_id`
-- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `reasoning` (encrypted), `web_search_call`
-- `event_msg` — UI events: `user_message` (**authoritative record of what the user typed**), `agent_message` (`phase`: `"commentary"` stream vs final), `task_complete` (`last_agent_message`), `token_count`, `turn_aborted`
-- `turn_context` — per-turn snapshot: `model`, `cwd`, `approval_policy`, `sandbox_policy`
+- `session_meta` — line 1: `session_id`+`id` (same UUID; `session_id` added ~0.140), `cwd`, `cli_version`, `originator`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `thread_source`, `git{branch, commit_hash, repository_url}`, `forked_from_id`
+- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`, optional `phase`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `reasoning` (encrypted), `web_search_call`, `tool_search_call`(+`_output`), `agent_message` (multi-agent)
+- `event_msg` — UI events: `user_message` (**authoritative record of what the user typed**), `agent_message` (`phase`: `"commentary"` stream vs final), `task_complete` (`last_agent_message`, may be null), `token_count`, `turn_aborted`
+- `turn_context` — per-turn snapshot: `model`, `cwd`, `workspace_roots`, `approval_policy`, `sandbox_policy`, `permission_profile`, `collaboration_mode`, `personality` (older files carry only the small subset)
+- `inter_agent_communication` — multi-agent delivery metadata; replays as a synthetic `agent_message`
 - `compacted` — compaction marker; `replacement_history[]` substitutes prior history on replay
 
-**Pitfall**: `response_item` user messages include injected context. Skip texts starting with `<user_instructions>`, `<environment_context>`, `<permissions`, `<collaboration_mode>`, `<apps_instructions>`, or `# AGENTS.md`. Prefer `event_msg`/`user_message` for the human's words.
+**Pitfall**: `response_item` user/developer messages include injected context. Skip texts starting with `<user_instructions>`, `<environment_context>`, `<permissions instructions>`, `<collaboration_mode>`, `<apps_instructions>`, or `# AGENTS.md`. Prefer `event_msg`/`user_message` for the human's words.
 
 ## Recipes
 
@@ -89,9 +91,10 @@ codex resume --last                  # most recent for current directory
 codex resume --all                   # picker across all directories
 codex exec resume <SESSION_ID> "prompt"   # headless continue
 codex fork <SESSION_ID>              # branch into a new thread
+codex archive|unarchive|delete <SESSION>  # manage a saved session (id or name); delete --force skips prompt
 ```
 
-The `codex resume` picker filters to the **current cwd** and interactive sources by default; add `--all` and `--include-non-interactive` to see everything (exec/MCP/subagent sessions).
+The `codex resume` picker filters to the **current cwd** and interactive sources (`cli`, `vscode`) by default; add `--all` (disables cwd filtering, shows CWD column) and `--include-non-interactive` to see everything (exec/MCP/subagent sessions).
 
 ## Tips
 
