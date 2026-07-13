@@ -1,7 +1,7 @@
 ---
 name: exploring-cursor-history
 description: Finds and explores Cursor IDE conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, or export a Cursor chat session, agent conversation, composer thread, or transcript.
-compatibility: Requires sqlite3 CLI and jq. macOS only (paths are macOS-specific).
+compatibility: Requires sqlite3 CLI and jq. Editor DB paths shown are macOS (~/Library); on Linux the editor lives under ~/.config/Cursor, on Windows %APPDATA%/Cursor. The CLI transcript tree (~/.cursor) is identical on all platforms.
 allowed-tools: Bash(sqlite3 *) Bash(jq *)
 metadata:
   author: jlreyes
@@ -11,16 +11,18 @@ metadata:
 
 Cursor stores conversations in SQLite databases (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). Query them directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
 
-## Storage locations (macOS)
+## Storage locations
+
+Editor DB paths below are macOS; on Linux replace `~/Library/Application Support/Cursor` with `~/.config/Cursor` (Windows `%APPDATA%/Cursor`). The `~/.cursor` CLI tree is identical on every platform.
 
 | Path | What it holds |
 |------|---------------|
-| `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | All conversation content + metadata (`cursorDiskKV` table). Can be ~1 GB |
-| `~/Library/Application Support/Cursor/User/workspaceStorage/<hash>/state.vscdb` | Legacy per-workspace conversation metadata (stopped updating at Cursor 3.0); `workspace.json` sibling maps hash → folder (`folder` or `workspace` key) |
-| `~/.cursor/projects/<path-slug>/agent-transcripts/<composerId>/<composerId>.jsonl` | **Plaintext JSONL mirror** of IDE agent conversations — easiest grep/export surface |
-| `~/.cursor/chats/<md5>/<agentId>/store.db` | Cursor CLI (`cursor-agent`) sessions |
-| `~/.cursor/plans/*.plan.md` | Plan-mode artifacts (markdown) |
-| `~/.cursor/prompt_history.json` | Rolling array of recent prompts |
+| `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | (editor) All conversation content + metadata (`cursorDiskKV` table). Can be ~1 GB |
+| `~/Library/Application Support/Cursor/User/workspaceStorage/<hash>/state.vscdb` | (editor) Legacy per-workspace conversation metadata (stopped updating at Cursor 3.0); `workspace.json` sibling maps hash → folder (`folder` or `workspace` key) |
+| `~/.cursor/projects/<path-slug>/agent-transcripts/<sessionId>/<sessionId>.jsonl` | **Plaintext JSONL transcript** of agent conversations — both IDE agent threads and CLI `agent -p` sessions land here; easiest grep/export surface. `<path-slug>` = workspace absolute path, leading `/` dropped, other `/` → `-`. May also be flat: `agent-transcripts/<sessionId>.jsonl` |
+| `~/.cursor/chats/<md5>/<agentId>/store.db` | Legacy Cursor CLI SQLite session store. **Not written by `agent -p` on 2026.07.x** — headless CLI sessions persist only as the JSONL above; present only where older/interactive/IDE CLI sessions created it |
+| `~/.cursor/plans/*.plan.md` | Plan-mode artifacts (markdown; editor) |
+| `~/.cursor/prompt_history.json` | Rolling array of recent prompts (editor) |
 
 ## Schema (quick reference)
 
@@ -119,14 +121,23 @@ done | sort -t'|' -rn | head -30
 
 ## Plaintext export (no SQLite at all)
 
+Each line is one JSON record: turn records `{"role":...,"message":{"content":[...]}}` plus a terminal `{"type":"turn_ended","status":"success"}` per `agent -p` run. Content blocks are `{"type":"text",...}` or `{"type":"tool_use","name":...,"input":...}`, so iterate all blocks and skip records without a `role` (`content[0].text` alone drops tool-call turns and prints a stray `:` for `turn_ended`):
+
 ```bash
-jq -r '.role + ": " + (.message.content[0].text // "")' \
-  ~/.cursor/projects/<slug>/agent-transcripts/<composerId>/<composerId>.jsonl
+jq -r 'select(.role) | .role + ": " +
+  ([.message.content[]
+    | if .type=="text" then .text
+      elif .type=="tool_use" then "[tool_use "+.name+" "+(.input|tostring)+"]"
+      else "["+.type+"]" end] | join("\n"))' \
+  ~/.cursor/projects/<slug>/agent-transcripts/<sessionId>/<sessionId>.jsonl
 ```
+
+User turns wrap the prompt as `<timestamp>…</timestamp>\n<user_query>\n…\n</user_query>`; tool **results** are not stored in the JSONL (only the `tool_use` call is) — use `agent -p … --output-format stream-json` to capture results live.
 
 ## Tips
 
 - Tool-call turns have empty `text` — render `toolFormerData.name` instead (the legacy `toolResults` field no longer exists).
 - Map a composerId to its project via `workspaceIdentifier.uri.fsPath`, or by which `~/.cursor/projects/<slug>/agent-transcripts/` directory contains it.
 - Cloud/background agents (`bc-*` IDs) keep almost nothing locally — transcripts are server-side.
+- `agent ls` / `agent resume` are interactive Ink TUIs (need a TTY; they abort with "Raw mode is not supported" when piped). To list CLI sessions programmatically, enumerate `~/.cursor/projects/*/agent-transcripts/*/` instead; `agent about --format json` and `agent status --format json` give machine-readable CLI/account info.
 - A conversation that shows "Chat Too Old" in the UI is still fully readable from the DB; only its server `conversationState` token is lost.

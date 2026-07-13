@@ -1,5 +1,5 @@
 {
-  "claude_code_version": "2.1.x",
-  "codex_cli_version": "0.137.x",
-  "cursor_agent_version": "3.7.x"
+  "claude_code_version": "2.1.207",
+  "codex_cli_version": "0.144.3",
+  "cursor_agent_version": "2026.07.09-a3815c0"
 }

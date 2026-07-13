@@ -28,13 +28,14 @@ Claude Code stores every session as a JSONL transcript (one JSON object per line
 
 ## Transcript schema (quick reference)
 
-Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `file-history-snapshot`, `mode`, `permission-mode`, `system`, `summary`. Full field tables and examples: [data-model.md](data-model.md).
+Entry types per line: `user`, `assistant`, `attachment`, `ai-title`, `last-prompt`, `queue-operation`, `file-history-snapshot`, `mode`, `permission-mode`, `system`, `summary`. Full field tables and examples: [data-model.md](data-model.md).
 
 The fields needed for most exploration:
 
 - `user` / `assistant` entries: `.timestamp` (ISO 8601), `.sessionId`, `.cwd`, `.gitBranch`, `.message.content` (string **or** array of blocks: `text`, `thinking`, `tool_use`, `tool_result`), `.uuid` / `.parentUuid` (conversation chain), `.isSidechain` (subagent work)
 - `ai-title` entries: `.aiTitle` — the generated session title
 - `assistant` entries: `.message.model`, `.message.usage` (token counts)
+- tool-result `user` entries: `.toolUseResult` (structured result, often richer than the `tool_result` block) and `.sourceToolAssistantUUID` (the `assistant` uuid it answers)
 
 ## Recipes
 

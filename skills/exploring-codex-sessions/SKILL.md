@@ -17,24 +17,29 @@ Codex CLI stores every session ("thread") as a JSONL rollout file under `$CODEX_
 |------|---------------|
 | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` | Full session transcripts. `<uuid>` is the session/thread ID (UUIDv7, time-sortable). Date dirs use **local** time |
 | `~/.codex/archived_sessions/rollout-*.jsonl` | Archived sessions (flat, via `codex archive`) |
-| `~/.codex/history.jsonl` | Every user-typed prompt across all sessions: `{"session_id", "ts" (unix sec), "text"}` |
-| `~/.codex/state_5.sqlite` | `threads` table: metadata index (cwd, preview, title, git info, archived flag). Treat as cache — rebuilt from rollouts |
-| `~/.codex/session_index.jsonl` | Thread names: `{"id", "thread_name", "updated_at"}`, last entry wins |
-| `~/.codex/config.toml` | `[history] persistence = "save-all"\|"none"` |
+| `~/.codex/history.jsonl` | User-typed prompts: `{"session_id", "ts" (unix sec), "text"}`. **Interactive TUI only** — `codex exec` does not write it, so it may be absent |
+| `~/.codex/state_5.sqlite` | `threads` table: metadata index (cwd, preview, title, git info, archived, `history_mode`). Treat as cache — rebuilt from rollouts |
+| `~/.codex/session_index.jsonl` | Thread names: `{"id", "thread_name", "updated_at"}`, last entry wins. Also interactive-only |
+| `~/.codex/config.toml` | Optional (absent by default): `[history] persistence = "save-all"\|"none"` |
 
-Sessions are **never auto-deleted**. Cold rollouts may be zstd-compressed to `.jsonl.zst` (feature-flagged; read with `zstdcat`). `CODEX_HOME` env var relocates everything.
+Sibling DBs (`memories_1.sqlite`, `goals_1.sqlite`, `logs_2.sqlite`) and `skills/` belong to other subsystems — ignore them for transcripts. Sessions are **never auto-deleted** (`codex archive` / `codex delete` are manual). Cold rollouts may be zstd-compressed to `.jsonl.zst` (feature-flagged; read with `zstdcat`). `CODEX_HOME` env var relocates everything.
 
 ## Rollout schema (quick reference)
 
-Every line: `{"timestamp": "<UTC RFC3339>", "type": "<tag>", "payload": {...}}` with five tags — full detail in [data-model.md](data-model.md):
+Every line: `{"timestamp": "<UTC RFC3339>", "type": "<tag>", "payload": {...}}` with six tags — full detail in [data-model.md](data-model.md):
 
-- `session_meta` — line 1: `id`, `cwd`, `cli_version`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `git{branch, commit_hash, repository_url}`, `forked_from_id`
-- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `reasoning` (encrypted), `web_search_call`
-- `event_msg` — UI events: `user_message` (**authoritative record of what the user typed**), `agent_message` (`phase`: `"commentary"` stream vs final), `task_complete` (`last_agent_message`), `token_count`, `turn_aborted`
-- `turn_context` — per-turn snapshot: `model`, `cwd`, `approval_policy`, `sandbox_policy`
+- `session_meta` — line 1: `id`/`session_id`, `cwd`, `cli_version`, `source` (`cli`, `vscode`, `exec`, `mcp`, subagent objects), `git{branch, commit_hash, repository_url}`, `history_mode`, `forked_from_id`
+- `response_item` — model-visible conversation: `message` (roles `user`/`assistant`/`developer`), `function_call`(+`_output`), `custom_tool_call` (e.g. `apply_patch`), `tool_search_call`, `reasoning` (encrypted), `web_search_call`
+- `event_msg` — UI events: `user_message` (**authoritative record of what the user typed**), `agent_message` (`phase`: `"commentary"` stream vs `"final_answer"`), `task_complete` (`last_agent_message`), `token_count`, `turn_aborted`
+- `turn_context` — per-turn snapshot: `model`, `cwd`, `approval_policy`, `sandbox_policy`, `permission_profile`, `collaboration_mode`
+- `world_state` — model-visible world snapshot (cwd, env, skills); not conversation — skip when building transcripts
 - `compacted` — compaction marker; `replacement_history[]` substitutes prior history on replay
 
-**Pitfall**: `response_item` user messages include injected context. Skip texts starting with `<user_instructions>`, `<environment_context>`, `<permissions`, `<collaboration_mode>`, `<apps_instructions>`, or `# AGENTS.md`. Prefer `event_msg`/`user_message` for the human's words.
+(Multi-agent sessions add `inter_agent_communication`/`_metadata`.)
+
+**history_mode pitfall**: `head -1 FILE | jq -r '.payload.history_mode'`. In `legacy` (current default) the recipes below work as written. In `paginated` there are **no** `user_message`/`agent_message` events — read `select(.type=="event_msg" and .payload.type=="item_completed") | .payload.item` (a `TurnItem`) instead.
+
+**Injected-context pitfall**: `response_item` `user` **and** `developer` messages include harness injections. Skip texts starting with `<environment_context>`, `<user_instructions>`, `<permissions instructions>`, `<collaboration_mode>`, `<multi_agent_mode>`, `<apps_instructions>`, `# AGENTS.md`, or the ``You are `/root`, the primary agent`` block. Prefer `event_msg`/`user_message` for the human's words.
 
 ## Recipes
 
@@ -60,7 +65,8 @@ jq -r 'select(.type=="event_msg" and .payload.type=="user_message") | .payload.m
 
 ```bash
 rg -l --glob 'rollout-*.jsonl' 'KEYWORD' ~/.codex/sessions
-# or search only what the user typed, with session IDs:
+# or search only what the user typed, with session IDs (interactive sessions only — history.jsonl
+# is absent on exec-only/fresh homes; fall back to the rg line above):
 jq -r 'select(.text|test("KEYWORD";"i")) | "\(.session_id)  \(.ts|todate)  \(.text[0:80])"' ~/.codex/history.jsonl
 ```
 
@@ -79,7 +85,7 @@ jq -r 'select(.type=="event_msg") | .payload |
   else empty end' FILE
 ```
 
-For tool calls add: `select(.type=="response_item" and .payload.type=="function_call") | "  [tool] \(.payload.name)(\(.payload.arguments[:150]))"`. For pre-late-2025 files (no `event_msg` wrapper) see the era notes in [data-model.md](data-model.md).
+For tool calls add: `select(.type=="response_item" and .payload.type=="function_call") | "  [tool] \(.payload.name)(\(.payload.arguments[:150]))"`. This works for `history_mode:"legacy"` files (the current default). For `paginated` files (no `user_message`/`agent_message` events) and pre-late-2025 files (no `event_msg` wrapper), see the notes in [data-model.md](data-model.md).
 
 ### Resume a found session
 
@@ -87,8 +93,10 @@ For tool calls add: `select(.type=="response_item" and .payload.type=="function_
 codex resume <SESSION_ID>            # interactive; also accepts a thread name
 codex resume --last                  # most recent for current directory
 codex resume --all                   # picker across all directories
-codex exec resume <SESSION_ID> "prompt"   # headless continue
-codex fork <SESSION_ID>              # branch into a new thread
+codex exec resume <SESSION_ID> "prompt"   # headless continue (also supports --last / --all)
+codex fork <SESSION_ID>              # branch into a new thread (--last / --all)
+codex archive <SESSION_ID>          # move to archived_sessions/
+codex delete <SESSION_ID>           # permanently remove a saved session
 ```
 
 The `codex resume` picker filters to the **current cwd** and interactive sources by default; add `--all` and `--include-non-interactive` to see everything (exec/MCP/subagent sessions).
@@ -98,4 +106,5 @@ The `codex resume` picker filters to the **current cwd** and interactive sources
 - Resume appends to the same rollout file; fork creates a new file whose `session_meta` has `forked_from_id` and replays parent lines — so mid-file `session_meta` lines exist in forked files.
 - Filename timestamps are local time; in-file timestamps are UTC — a late-evening session can sit in the "wrong" date directory.
 - Subagent/review/compact threads have object-valued `source` in `session_meta`; filter on it to separate human sessions from automation.
-- There is no `codex history` subcommand — `history.jsonl` plus the recipes above are the interface.
+- `codex exec --ephemeral` runs with no persisted rollout at all — such runs leave nothing under `sessions/`.
+- There is no `codex history` subcommand — `history.jsonl` (interactive only) plus the recipes above are the interface. `codex --version` for this skill's baseline: 0.144.3.

@@ -1,6 +1,6 @@
 # Cursor IDE Conversation Storage — Data Model
 
-Verified on macOS against Cursor 3.7.x (June 2026) by querying real databases. Cursor 3.0 (April 2026) moved conversation metadata from workspace DBs into the global DB; the legacy model is documented at the bottom because old conversations still use it.
+CLI transcript format re-verified on **Linux** against Cursor CLI `2026.07.09-a3815c0` on **2026-07-13** by running real `agent -p` sessions and inspecting the on-disk JSONL (see [The ~/.cursor tree](#the-cursor-tree)). The **editor** SQLite model (global/workspace `state.vscdb`, `composerData`, bubbles, legacy) below was verified on macOS against Cursor 3.7.x (June 2026) by querying real databases and is carried forward **unchanged** — it was **not** re-verified this pass (no Cursor editor / `state.vscdb` exists on this CLI-only host). Cursor 3.0 (April 2026) moved conversation metadata from workspace DBs into the global DB; the legacy model is documented at the bottom because old conversations still use it.
 
 ## Contents
 
@@ -100,12 +100,17 @@ Background/cloud agents: global `ItemTable` `workbench.backgroundComposer.persis
 
 | Path | Content |
 |---|---|
-| `projects/<path-slug>/agent-transcripts/<cid>/<cid>.jsonl` | Plaintext JSONL mirror of IDE agent conversations. One record per turn: `{"role":"user"\|"assistant","message":{"content":[{"type":"text","text":"…"}]}}`. ComposerIds match the global DB. Sidecars: `agent-tools/`, `terminals/`, `canvases/` |
-| `chats/<md5>/<agentId>/store.db` | Cursor CLI (`cursor-agent`) sessions — `meta` table (JSON: `agentId`, `name`, `mode`, `createdAt`) + `blobs` (binary) |
-| `plans/*.plan.md` | Plan-mode artifacts; indexed by global `ItemTable` `composer.planRegistry` |
-| `ai-tracking/ai-code-tracking.db` | AI attribution; `conversation_summaries` table (`conversationId`, `title`, `tldr`, `overview`) when populated |
-| `prompt_history.json` | Rolling plain-string array of recent prompts |
-| `worktrees/<name>/` | Agent worktree checkouts |
+| `projects/<path-slug>/agent-transcripts/<sessionId>/<sessionId>.jsonl` (or flat `agent-transcripts/<sessionId>.jsonl`) | Plaintext JSONL transcript of agent conversations — **both** IDE agent threads and CLI `agent -p` sessions land here. `<path-slug>` = workspace absolute path with leading `/` dropped and remaining `/` → `-` (`/tmp/cursortest` → `tmp-cursortest`, verified). `<sessionId>` = the `session_id` in `--output-format json`; matches the global-DB composerId for IDE threads. **Verified record shapes (2026.07.09):** turn records `{"role":"user"\|"assistant","message":{"content":[…]}}`, plus one terminal `{"type":"turn_ended","status":"success"}` per `agent -p` run (has no `role`). Content blocks seen: `{"type":"text","text":"…"}` and `{"type":"tool_use","name":"<Tool>","input":{…}}` (e.g. `name:"Shell"`, `input:{command,description}`). User turns wrap the prompt: `<timestamp>…</timestamp>\n<user_query>\n…\n</user_query>`. **Tool _results_ are NOT persisted here** — only the `tool_use` call is (results appear in stream-json output, never the file). Possible sidecars `agent-tools/`, `terminals/`, `canvases/` were **not** created by plain CLI runs |
+| `chats/<md5>/<agentId>/store.db` | Legacy CLI SQLite session store (`meta` JSON: `agentId`, `name`, `mode`, `createdAt`; + `blobs`). **Not created by `agent -p` on 2026.07.x** (headless CLI sessions persist only as the JSONL above, and `--continue`/`--resume` read that JSONL); appears only where older/IDE/interactive CLI sessions wrote it — unverified on this host |
+| `agent-cli-state.json` | CLI global state, e.g. `{"version":1,"hasClearedLegacyStatsigFields":true}` (verified) |
+| `projects/<path-slug>/repo.json` | `{"id":"<uuid>"}` — per-workspace repo id (verified) |
+| `projects/<path-slug>/.workspace-trusted` | `{"trustedAt","workspacePath","trustMethod":"cli-flag"}` — written by `--trust` (verified) |
+| `projects/<path-slug>/worker.log`, `worker.sock` | Local LSP/indexing worker log + unix socket started per workspace (verified) |
+| `skills-cursor/<name>/SKILL.md` | Bundled Cursor CLI skills, synced (`.sync-manifest.json`) (verified) |
+| `plans/*.plan.md` | Plan-mode artifacts; indexed by global `ItemTable` `composer.planRegistry` (editor; not present on CLI-only host) |
+| `ai-tracking/ai-code-tracking.db` | AI attribution; `conversation_summaries` table (`conversationId`, `title`, `tldr`, `overview`) when populated (editor) |
+| `prompt_history.json` | Rolling plain-string array of recent prompts (editor; not created by CLI runs here) |
+| `worktrees/<name>/` | Agent worktree checkouts (`agent -w`; base `~/.cursor/worktrees/<repo>/<name>`) |
 
 ## Legacy model (pre-3.0)
 
@@ -128,7 +133,8 @@ Even older history: workspace `ItemTable` keys `aiService.prompts` / `aiService.
 
 ## Caveats
 
-- Verified on macOS Cursor 3.7.x with `_v: 16` composerData / `_v: 3` bubbles; Windows/Linux paths differ (`%APPDATA%/Cursor`, `~/.config/Cursor`).
+- Editor model verified on macOS Cursor 3.7.x with `_v: 16` composerData / `_v: 3` bubbles (not re-verified 2026.07.09); editor DB path differs by OS (macOS `~/Library/Application Support/Cursor`, Linux `~/.config/Cursor`, Windows `%APPDATA%/Cursor`). The `~/.cursor/` CLI tree is the same path on all platforms.
+- `agent ls` and `agent resume` are interactive Ink TUIs that need a real TTY — piped/headless they abort with "Raw mode is not supported". For scripting, read the JSONL directly, or use `agent about --format json` / `agent status --format json` (both verified machine-readable).
 - `agentKv:blob` protobufs are undecoded; readable fragments only.
 - "Chat Too Old" / "corrupted data" in the UI means the server `conversationState` token was lost in an upgrade — local text remains fully readable.
 - Deleting the global `state.vscdb` is unrecoverable (conversations are not in workspace DBs); treat it as the canonical store and never open it read-write.
