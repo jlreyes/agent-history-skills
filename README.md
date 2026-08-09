@@ -31,9 +31,9 @@ Or manually: copy any directory under `skills/` into `~/.claude/skills/` (Claude
 A scheduled GitHub Action (`.github/workflows/check-upstream.yml`, weekly)
 installs the current Claude Code, Codex, and Cursor CLIs fresh and diffs
 their `--version` output against `.github/tracked-versions.json`, opening or
-updating a tracking issue when something changed (job: `check`). That part
-is deliberately dumb — no LLM calls, no secrets, no auto-commits — it only
-tells you *that* something shipped a new version.
+updating a tracking issue when something changed. It is deliberately dumb —
+no LLM calls, no secrets, no auto-commits — and only tells you *that*
+something shipped a new version.
 
 **Coverage gap**: this only catches CLI drift. `exploring-cursor-history`
 also documents the Cursor **IDE** app's on-disk schema (`composerData`/bubble
@@ -42,48 +42,43 @@ desktop GUI app — so an IDE-only schema change won't trip this check. That
 skill still needs an occasional manual re-verification pass on a machine
 with the Cursor app installed.
 
-A second job (`propose-update`) runs only when drift is detected **and** an
-`ANTHROPIC_API_KEY` repo secret is configured: it fans out one subagent per
-affected skill (via `anthropics/claude-code-action`, headlessly) to
-re-verify against real, freshly-installed binaries (not memory), archive
-the pre-change `data-model.md` into `references/` before overwriting it if
-the change is a genuine format change, and open a single PR updating
-whichever skill(s) actually needed it plus `tracked-versions.json` — review
-before merging, same as any other PR. Without the secret, only the tracking
-issue fires and resolving it stays manual.
+### Resolving drift
 
-Two more secrets unlock deeper verification for two of the three skills:
+The open tracking issue is the signal to run a refresh. The refresh itself is
+[`/refresh-history-skills`](.claude/commands/refresh-history-skills.md) — one
+command, run on a real machine, that fans out one subagent per affected skill
+against the installed CLIs and real on-disk history, then opens a single PR
+updating whichever skills actually changed plus `tracked-versions.json`.
 
-| Secret | Unlocks |
-|---|---|
-| `ANTHROPIC_API_KEY` | Required for the `propose-update` job to run at all |
-| `OPENAI_API_KEY` | Lets the job log in and run a real `codex exec` prompt to verify `exploring-codex-sessions`, instead of relying on `--help` output alone |
-| `CURSOR_API_KEY` | Lets the job run a real `agent -p` prompt to verify `exploring-cursor-history` the same way |
+Each subagent works through a fixed ten-step checklist: read the current docs
+in full, run the real CLI and every relevant `--help`, `ls` the real storage
+dirs, enumerate *every* entry type and field present across the whole local
+corpus (not spot-checks), re-run every recipe against real data, generate
+fresh data with a live headless run, cross-check the tool's actual source and
+release history, then decide archive-vs-fix-in-place before touching
+`data-model.md`.
 
-Without `OPENAI_API_KEY` / `CURSOR_API_KEY`, the corresponding skill still
-gets re-verified from `--help`/`--version` output and official docs, just
-not from a live, freshly-generated session — the PR description says which
-mode it ran in for each tool.
+**Why this part isn't automated.** It was, for five weeks, and the job is
+worth learning from rather than repeating. A GitHub runner is the wrong place
+for it: there is no real history corpus to enumerate against — only the
+handful of records the job generates for itself — and the Cursor desktop app
+can't be installed there at all, which is most of `exploring-cursor-history`.
+The execution held up worse than the premise. Four of five scheduled runs
+produced nothing: the orchestrating agent spawned its subagents, narrated the
+fan-out, and ended its turn while they were still running, killing them and
+exiting green. The one run that did finish turned in claims a later local pass
+disproved against real data — tables that don't exist, JSON keys that were
+never there. Detection is cheap and reliable, so it stays; verification needs a
+machine that actually uses these tools.
 
-**Setting a secret:** run this yourself, in your own terminal — not through
-an agent session, so the key value never passes through anyone's context or
-transcript:
-
-```bash
-gh secret set ANTHROPIC_API_KEY --repo jlreyes/agent-history-skills
-gh secret set OPENAI_API_KEY --repo jlreyes/agent-history-skills
-gh secret set CURSOR_API_KEY --repo jlreyes/agent-history-skills
-# each pastes/prompts for the value interactively; nothing is echoed
-```
-
-This is standard CI-secret hygiene regardless of any agent-visibility policy
-you run elsewhere — `gh secret set` with no `--body` flag reads from a
-hidden prompt, and the value is never visible to anything running inside the
-workflow's logs (GitHub masks it automatically).
+The `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `CURSOR_API_KEY` repo secrets
+are no longer read by any workflow — live Codex and Cursor runs now happen
+locally under your own credentials. They can be removed with `gh secret
+delete`.
 
 ## Compatibility
 
-- macOS paths throughout (the storage locations are platform-specific; Linux equivalents are noted where known).
+- Verified on macOS. Storage locations are platform-specific; Linux and Windows equivalents are given where known (`exploring-cursor-history` documents all three).
 - The skills teach the storage data models and compose queries from built-in tools (`jq`, `sqlite3`, `grep`) rather than bundling helper scripts — agents can adapt the recipes to any question.
 - All database access is read-only.
 
