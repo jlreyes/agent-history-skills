@@ -1,6 +1,9 @@
+> **Historical 0.146.0 snapshot.** This complete reference is retained from `origin/main`. Use the [current data model](../data-model.md) for Codex CLI 0.153.4.
+
+
 # Codex CLI Session Storage — Data Model
 
-Verified against codex-cli 0.153.4 on 2026-09-06: a live persistent run (15 lines, ordinals 0–14, paginated `UserMessage`/`AgentMessage` and `token_usage_record`) and exhaustive Studio/laptop corpora (2,557/1,276,753 and 2,630/907,563 physical files/lines). JSONL rollouts are canonical; SQLite stores rebuildable projections. For the prior format, see [the 0.146.0 snapshot](references/data-model-0.146.0.md).
+Verified against codex-cli 0.146.0 on 2026-08-09: a freshly generated `codex exec` rollout, a full enumeration of 1103 real rollout files spanning Sept 2025 → Aug 2026, and the `openai/codex` source at tags `rust-v0.137.0` vs `rust-v0.146.0` (`protocol/src/protocol.rs`, `rollout/src/policy.rs`, `rollout/src/recorder.rs`). JSONL rollouts are ground truth; `state_5.sqlite` is a rebuildable cache.
 
 ## Contents
 
@@ -25,37 +28,33 @@ $CODEX_HOME (default ~/.codex)
 ├── history.jsonl                     # typed prompts, append-only, mode 0600 — may be stale, see below
 ├── session_index.jsonl               # thread names: {id, thread_name, updated_at}
 ├── state_5.sqlite (+ -wal, -shm)     # thread metadata index (filename is schema-versioned)
-├── thread_history_1.sqlite            # rebuildable item projection
-├── queue_1.sqlite                     # pending user submissions
 ├── config.toml                       # [history] persistence = "save-all" | "none"
 └── auth.json                         # credentials — never read or print
 ```
 
-Other stores serve adjacent subsystems. Treat only rollouts as canonical transcript material; projections may contain transcript item JSON.
+Everything else in `$CODEX_HOME` belongs to other subsystems and holds no transcripts: `memories_1.sqlite`, `goals_1.sqlite`, `logs_2.sqlite` (+ legacy `logs_1.sqlite`), `sqlite/codex-dev.db` and `sqlite/codex-history-snapshots-dev.db` (app-server/desktop), `.codex-global-state.json` (Electron desktop UI state), `skills/`, `plugins/`, `hooks/`, `shell_snapshots/`, `attachments/`, `thread-writer-locks/`, `installation_id`.
 
 - Date dirs and filename timestamps are **local time**; in-file timestamps are UTC RFC3339.
 - Session IDs are UUIDv7 (time-ordered) since ~Oct 2025, UUIDv4 before.
 - No automatic retention/deletion. `codex archive`/`unarchive` move files; `codex delete` removes one permanently.
-- Compression uses suffix `.zst`, zstd level 3, and only considers rollouts older than `MIN_ROLLOUT_AGE = 7 days`.
-- SQLite roots follow `CODEX_SQLITE_HOME`, then `CODEX_HOME`; do not assume `CODEX_HOME` relocates every store.
+- Compression is real but off by default: `rollout/src/compression.rs` uses suffix `.zst`, zstd level 3, and only considers rollouts older than `MIN_ROLLOUT_AGE = 7 days`. 0 of 1103 files were compressed on the verification host.
+- `CODEX_HOME` relocates everything.
 
 ## RolloutLine envelope
 
-Every wrapped line: `{"timestamp": "<UTC RFC3339>", "type": T, "payload": {…}}`, with optional envelope metadata. `ordinal` is retained for legacy compatibility and emitted sequentially by current paginated writers; the bare era is the exception.
+Every line: `{"timestamp": "<UTC RFC3339>", "type": T, "payload": {…}}`, plus an optional `ordinal` (u64) that is `skip_serializing_if none` — absent from all 1103 files checked.
 
-From `RolloutItem` (protocol.rs, `tag="type" content="payload"`, snake_case), `T` has **eleven** source variants:
+From `RolloutItem` (protocol.rs, `tag="type" content="payload"`, snake_case), `T` is one of **eight**:
 
-`session_meta | response_item | turn_context | world_state | compacted | event_msg | inter_agent_communication | inter_agent_communication_metadata | token_usage_record | security_risk_score | realtime_item`
+`session_meta | response_item | turn_context | world_state | compacted | event_msg | inter_agent_communication | inter_agent_communication_metadata`
 
-Wrapped corpora observe `session_meta`, `response_item`, `turn_context`, `world_state`, `compacted`, `event_msg`, `inter_agent_communication_metadata`, and `token_usage_record`; plain inter-agent, security-score, and realtime variants are source-only/unobserved. Historical `ghost_snapshot` is ignored/stripped by current readers.
-
-The following examples and persistence counts in this legacy section describe the historical 0.146 corpus; use the current pagination section below for current writers.
+Observed frequency across the corpus: `event_msg` 220361, `response_item` 196356, `turn_context` 18018, `world_state` 3560, `session_meta` 2012, `inter_agent_communication_metadata` 1759, `compacted` 459. Plain `inter_agent_communication` did not appear — in practice the delivered cross-agent message is written as a `response_item` of type `agent_message` and only the `{"trigger_turn": bool}` metadata line accompanies it.
 
 `world_state`, `inter_agent_communication` and `inter_agent_communication_metadata` are **new since 0.137** (which had exactly five variants). The five original variants are unchanged in name and payload, so older rollouts remain readable by a current reader.
 
 ## session_meta
 
-In the legacy 0.146 format, `session_meta` is line 1 of a fresh session. Legacy forks/subagents replayed parent lines, so later metas could occur. Paginated forks use `history_base` lineage/cutoff instead.
+Always line 1 of a fresh session. Forked and subagent files replay the parent's lines, so mid-file `session_meta` occurs — in a forked file line 1 is the *new* thread (carrying `forked_from_id`/`parent_thread_id`) and the later metas are the replayed parent's.
 
 Live 0.146.0 `codex exec` example (non-git cwd, so no `git` block):
 
@@ -79,7 +78,7 @@ Live 0.146.0 `codex exec` example (non-git cwd, so no `git` block):
 - `git:{commit_hash, branch, repository_url}` present when cwd is a git repo (1475 / 2013 metas).
 - Other optional fields seen on disk: `forked_from_id`, `parent_thread_id`, `agent_nickname`, `agent_role`, `agent_path`, `dynamic_tools`, `memory_mode`, `multi_agent_version`. Pre-2026 files carry `instructions` instead of `base_instructions`.
 - `source` (`SessionSource`): `"cli"`, `"vscode"` (the serde default), `"exec"`, `"mcp"`, `{"custom": …}`, `{"internal": …}`, `"unknown"`, or subagent objects `{"subagent":{"thread_spawn":{parent_thread_id, depth, agent_path, agent_nickname, agent_role}}}` — also `review`, `compact`, `memory_consolidation`, `{"other": …}`. Observed: `vscode` 972, `subagent/thread_spawn` 513, `subagent/other` 412, `cli` 109, `exec` 1.
-- `thread_source` (`ThreadSource`): `user` | `subagent` | `guardian_review` | `{"feature": …}` | `memory_consolidation`.
+- `thread_source` (`ThreadSource`): `user` | `subagent` | `{"feature": …}` | `memory_consolidation`.
 - `originator` is a free string set by the host, **not** limited to CLI values. Observed: `Codex Desktop` 1879, `codex_cli_rs` 108, `codex-tui` 26, `codex_work_desktop` 3, `codex_exec` 1.
 - Everything lands in the same `sessions/` tree; `codex resume`'s picker shows only interactive sources unless `--include-non-interactive`.
 
@@ -145,18 +144,10 @@ Observed counts: `token_count` 91921, `agent_reasoning` 51739, `agent_message` 2
 
 `ThreadHistoryMode` (serialized `legacy` | `paginated`, `#[serde(default)]` → `Legacy`) is recorded in `session_meta.history_mode` and the `threads.history_mode` column, and it selects which event records a rollout contains.
 
-- **legacy** — older files persist each user turn and agent reply as an `event_msg`.
-- **paginated** — current persistent exec defaults here (since 0.148): model-visible items are persisted as `item_completed` events carrying a `TurnItem`. Read `select(.type=="event_msg" and .payload.type=="item_completed") | .payload.item`.
+- **legacy** — current default and what a fresh 0.146.0 `codex exec` writes. Each user turn and agent reply is persisted as its own `event_msg`. The SKILL.md transcript recipes rely on this.
+- **paginated** — the per-item `event_msg` records are dropped; model-visible items are persisted as `item_completed` events carrying a `TurnItem`. To read one, walk `select(.type=="event_msg" and .payload.type=="item_completed") | .payload.item`.
 
-Use the current projection or inspect `session_meta.history_mode` before choosing a reader. Legacy is the serde-default fallback, not evidence that a current file is legacy.
-
-Current `TurnItem` source variants (19) include observed `AgentMessage`, `CollabAgentToolCall`, `CommandExecution`, `ContextCompaction`, `DynamicToolCall`, `Extension`, `FileChange`, `FunctionCallOutput`, `ImageView`, `McpToolCall`, `Plan`, `Reasoning`, `SubAgentActivity`, `UserMessage`, and `WebSearch`; source-only variants are `HookPrompt`, `ImageGeneration`, `EnteredReviewMode`, and `ExitedReviewMode`. `FunctionCallOutput` has `{id,name,namespace?,output}`. Render message text only; never expose tool inputs or outputs by default.
-
-## Current pagination and token records
-
-`token_usage_record` has `thread_id`, `turn_id`, `session_id`, `root_turn_id`, `response_id`, `usage`, `turn_token_usage`, and `thread_token_usage`. Current `session_meta` can add `forked_from_ordinal_exclusive`; paginated forks use `history_base` lineage/cutoff rather than copied parent lines.
-
-Current `turn_context` can add `root_turn_id`, `active_permission_profile`, `network`, and `cyber_access_program`, alongside the corpus-observed permission and collaboration fields. `compacted` can add `replacement_history_metadata`, `guardian_history`, `mcp_resource_origins`, `compaction_response_id`, and `latest_token_usage_record`.
+Corpus reality: 1838 metas say `legacy`, 175 (pre-0.14x) omit the field, **0 say `paginated`**. Paginated is documented from `policy.rs` only; it was not observed on disk and there is no `codex exec` flag to force it. Check `head -1 FILE | jq -r '.payload.history_mode'` before choosing a reader.
 
 ## turn_context, world_state, compacted
 
@@ -186,28 +177,25 @@ Current `turn_context` can add `root_turn_id`, `active_permission_profile`, `net
 {"session_id":"019e98d5-…","ts":1780680560,"text":"the typed prompt"}
 ```
 
-Only user prompts, all sessions interleaved, append-only, `ts` in unix **seconds**. `session_id` identifies the logical thread; resolve its current generation through `state_5.threads.rollout_path`, not filename matching alone. `[history] persistence = "none"` disables it; `max_bytes` trims oldest to 80% of cap.
+Only user prompts, all sessions interleaved, append-only, `ts` in unix **seconds**. `session_id` matches the rollout filename UUID, so this doubles as a reverse index. `[history] persistence = "none"` disables it; `max_bytes` trims oldest to 80% of cap.
 
 **Verify freshness before trusting it.** The writer still exists at 0.146.0 (`codex-rs/message-history/src/lib.rs`, `HISTORY_FILENAME = "history.jsonl"`), but on the verification host — with `persistence = "save-all"` set — the file's last append was **2026-07-10** while hundreds of sessions ran afterwards, and the live `codex exec` run did not append to it either. Check `ls -l ~/.codex/history.jsonl` against the newest rollout; when it lags, use `state_5.threads.first_user_message` or the rollouts themselves instead.
 
 ## state_5.sqlite
 
-`threads` now has 38 columns, including `project_id`; older databases have 37. The original columns are `id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path, created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms, history_mode, name, is_pinned, thread_section_id, section_position, section_entered_at_ms`.
+`threads` columns (37): `id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path, created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms, history_mode, name, is_pinned, thread_section_id, section_position, section_entered_at_ms`.
 
 New since 0.137: `recency_at`, `recency_at_ms`, `history_mode`, `name` (thread name, also in `session_index.jsonl`), `is_pinned`, `thread_section_id`, `section_position`, `section_entered_at_ms`. `sandbox_policy` stores serialized JSON, not a bare string. `first_user_message`/`preview` may contain an injected block rather than human text for guardian and subagent threads.
 
-Other tables: `thread_spawn_edges(parent_thread_id, child_thread_id, status)` maps parent/child subagent threads (`status` ∈ `open`/`closed`); `thread_sections` includes `id`, `name`, and `appearance`; `thread_dynamic_tools`, `backfill_state`, `external_agent_config_imports`, `remote_control_enrollments`, `_sqlx_migrations` support unrelated subsystems. Rollout JSONL is canonical for transcript content, while `threads.rollout_path` is operationally authoritative for selecting the current generation after revert.
-
-Current metadata also includes `rollout_migration_state`, `rollout_migration_skipped_rollouts`, `projects`, `project_roots`, `project_idempotency_keys`, and `thread_artifacts`. `thread_history_1.sqlite` projects `thread_turns`, `thread_items`, `thread_history_projection_state`, and `thread_realtime_items`; `queue_1.sqlite` has `queued_items` and `queued_thread_revisions`. Queue tables are mutable live state.
+Other tables: `thread_spawn_edges(parent_thread_id, child_thread_id, status)` maps parent/child subagent threads (`status` ∈ `open`/`closed`); `thread_sections(id, name)` is new; `thread_dynamic_tools`, `backfill_state`, `external_agent_config_imports`, `remote_control_enrollments`, `_sqlx_migrations` support unrelated subsystems. The DB is backfilled from rollout files on upgrade — always recoverable, never authoritative.
 
 ## Format eras (2025–2026)
 
 Readers that walk old history must handle all of these. Verified against the oldest files on disk.
 
-1. **Bare era (≤ mid Sept 2025)**: raw records have no rollout envelope; the current envelope recipes do not read them.
-2. **Wrapped era (Sept 2025 →)**: `{timestamp,type,payload}` is the envelope; meta gains `cwd`, `originator`, and `cli_version`.
+1. **Bare era (≤ mid Sept 2025)**: line 1 is raw `{"id","timestamp","instructions","git"}` — no `cwd`, no envelope, no per-line timestamps; bare response items (`{"type":"message","role","content"}` at top level); `{"record_type":"state"}` lines. Recover cwd from `<environment_context>` in the first user message. Confirmed on `sessions/2025/09/02/` and two `2025/09/16/` files; the `event_msg` transcript recipe correctly returns nothing for these.
+2. **Wrapped era (Sept 2025 →)**: `{timestamp,type,payload}` envelope; meta gains `cwd`, `originator`, `cli_version`; `source` appears ~Oct 2025. Both formats coexist within `2025/09/16/` — the crossover file is the 10:02 session.
 3. **Meta drift (Feb 2026 →)**: `instructions: string|null` → `base_instructions: {text}`; `model_provider` added; multi-agent fields (`agent_nickname`, `forked_from_id`, `parent_thread_id`) ~Mar 2026; `thread_source` by Jun 2026. `originator` moved off `codex_cli_rs` to `codex-tui` and, for desktop hosts, `Codex Desktop`.
 4. **Event drift**: `user_message` `{kind:"plain"}` → `{images, local_images, audio, local_audio, text_elements}`; `agent_reasoning` events persisted 2025–early 2026, since replaced by encrypted `response_item` reasoning; `exec_command_end` no longer persisted (396 survivors, all from ≤0.118); `agent_message.phase` gains the explicit `final_answer` value.
-5. **0.14x era (mid-2026 →)**: `world_state`, inter-agent metadata, `history_mode`, and current session metadata arrive.
-6. **0.147–0.148**: pagination, ordinal, projection, rollout migration, and queue stores arrive; persistent exec switches to paginated in 0.148. Security-risk scores arrive in 0.148.
-7. **0.153**: token usage, realtime items, and shared-history compression arrive. Terminology is now “threads,” while on-disk directories remain `sessions/` and `archived_sessions/`.
+5. **0.14x era (mid-2026 →)**: three new rollout line types (`world_state`, `inter_agent_communication`, `inter_agent_communication_metadata`); `history_mode` added to `session_meta` and `state_5.threads`; `session_id`, `context_window` added to `session_meta`; `agent_message` and `tool_search_call`/`tool_search_output` added to `response_item`; `thread_settings_applied` now persisted. **All of it is additive** — no field or variant from the 0.137 shape was renamed, removed, or restructured, so pre-0.14x rollouts are a valid subset of the current schema and need no separate reader.
+6. **Terminology**: "sessions"/"conversations" → "threads" in source and CLI; on-disk dirs remain `sessions/` and `archived_sessions/`.

@@ -1,6 +1,6 @@
 # Claude Code Session Storage — Data Model
 
-Verified against Claude Code 2.1.226 on 2026-08-09: a full enumeration of every `.type`, nested key, and enum value across 114,491 real transcript lines (167 main transcripts + 243 subagent transcripts, versions 2.1.201 → 2.1.226, plus 78 `1.0.x`-era `.jsonl.backup` files), a live `claude -p` run, the installed binary's own reader/writer code, and the official docs (code.claude.com/docs/en/claude-directory, /settings, /data-usage).
+Verified on 2026-09-06 against the official 2.1.263 binary/help, an authoritative laptop writer at 2.1.240, and 218,064 valid lines (1,533 JSONL files plus 78 legacy backups). Current 2.1.263 live-write validation did not complete.
 
 Everything documented here is additive over the older shape: `1.0.x` transcripts on disk still carry the same `user`/`assistant` + `message.content` + `uuid`/`parentUuid` core, so old transcripts remain a valid subset. There is no archived prior revision.
 
@@ -16,14 +16,15 @@ Everything documented here is additive over the older shape: `1.0.x` transcripts
 ## Directory layout
 
 ```
-~/.claude/
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"  # transcript-relevant subset
 ├── projects/
 │   └── -Users-me-repos-Foo/                  # cwd with "/" → "-"
 │       ├── <session-id>.jsonl                # main transcript
 │       ├── <session-id>/
 │       │   ├── subagents/
 │       │   │   ├── agent-<agent-id>.jsonl    # subagent transcript (same schema)
-│       │   │   └── agent-<agent-id>.meta.json
+│       │   │   ├── agent-<agent-id>.meta.json
+│       │   │   └── journal.jsonl             # started/result lifecycle records
 │       │   ├── tool-results/<id>.txt         # large tool output spilled to file
 │       │   └── workflows/wf_*.json           # workflow run records
 │       ├── .session-aliases                  # sibling project-dir paths, one per line
@@ -66,10 +67,11 @@ Each line is a standalone JSON object discriminated by `.type`.
 ```
 
 - `message.content` as array holds blocks: `{type:"text", text|content}`, `{type:"tool_result", tool_use_id, content}`, `image`, `document`, `fallback`.
+- Current user metadata can also include `classifierMetaLines`, `imagePasteIds`, `interruptedByShutdown`, `interruptedMessageId`, `isCompactSummary`, `isVisibleInTranscriptOnly`, `mcpMeta`, `queueOrigin`, `queuePriority`, `stackedExpansion`, `stackedOriginalInput`, `thinkingMetadata`, `toolEndsTurn`, `turnCompanion`, and `userFeedback`. `origin.kind` also observes `peer`.
 - `promptSource` (observed): `typed`, `system`, `queued`, `sdk`.
 - `permissionMode` (observed): `auto`, `bypassPermissions`, `plan`, `acceptEdits`, `default`. The CLI's `--permission-mode` also accepts `manual` and `dontAsk`.
-- `origin`: `{kind: "human" | "task-notification" | "coordinator"}`.
-- Tool results come back as `user`-typed entries (role user, `tool_result` block) — not every `user` line is a human prompt. Those carry `toolUseResult` (structured result) and `sourceToolAssistantUUID` (the `assistant` entry that issued the call). Injected harness text carries `isMeta: true`.
+- `origin` on user entries: `{kind: "human" | "task-notification" | "coordinator" | "peer"}`.
+- Tool results come back as `user` entries (role user, `tool_result` block) — not every `user` line is a human prompt. Those carry `toolUseResult` (structured result) and `sourceToolAssistantUUID` (the `assistant` entry that issued the call). Injected harness text carries `isMeta: true`.
 - `toolUseResult` for Bash may replace inline output with `persistedOutputPath` + `persistedOutputSize`, pointing at `<session-id>/tool-results/<id>.txt`.
 
 ### `assistant`
@@ -108,6 +110,7 @@ Each line is a standalone JSON object discriminated by `.type`.
 ```
 
 - Locally-generated (non-API) assistant lines have `model: "<synthetic>"` and no `requestId`.
+- Current assistant messages may add `container`, `context_management`, and diagnostics; usage may add `output_tokens_details`. Nested tool results may carry a `tool_reference`.
 - Error turns add `isApiErrorMessage`, `error`, `apiErrorStatus`, `errorDetails`, `isAbortedMidStream`.
 - Attribution of a turn: `attributionAgent`, `attributionSkill`, `attributionPlugin`, `attributionMcpServer`, `attributionMcpTool`.
 
@@ -115,10 +118,11 @@ Each line is a standalone JSON object discriminated by `.type`.
 
 | `.type` | Fields | Purpose |
 |---------|--------|---------|
-| `ai-title` | `aiTitle`, `sessionId` | Generated session title (shown in `/resume` picker) |
-| `custom-title` | `customTitle`, `sessionId` | User-set session title; `--resume` accepts a title in place of an ID |
+| `ai-title` | `aiTitle`, `sessionId` | Generated reader-compatible title |
+| `custom-title` | `customTitle`, `sessionId` | Legacy/user-set reader-compatible title |
+| `agent-name` | `agentName`, `sessionId` | Current session name |
 | `last-prompt` | `lastPrompt`, `leafUuid`, `sessionId` | Last user prompt, for picker preview |
-| `queue-operation` | `operation` (`enqueue`/…), `content`, `sessionId`, `timestamp` | Prompt queueing; written before the `user` entry, outside the uuid DAG |
+| `queue-operation` | `operation` (`enqueue`, `dequeue`, `popAll`, `remove`), `content`, `sessionId`, `timestamp` | Prompt queueing; written before the `user` entry, outside the uuid DAG |
 | `attachment` | `attachment.type`, `parentUuid` | Harness metadata attached to a turn |
 | `system` | `subtype`, plus subtype-specific fields | Turn boundaries and internal events |
 | `mode` / `permission-mode` | `mode` / `permissionMode` | Mode changes mid-session (`mode` observed only as `normal`) |
@@ -127,16 +131,16 @@ Each line is a standalone JSON object discriminated by `.type`.
 | `pr-link` | `prNumber`, `prUrl`, `prRepository` | Links the session to a PR (`--from-pr` resolves this) |
 | `relocated` | `relocatedCwd` | The session's cwd moved (e.g. `/cd`, worktree) |
 | `worktree-state` | `worktreeSession{originalCwd, worktreePath, worktreeName, worktreeBranch, …}` | `--worktree` session state |
-| `agent-name` / `agent-setting` | `agentName` / `agentSetting` | Background-agent name; agent definition in use |
+| `agent-setting` | `agentSetting` | Background-agent definition in use |
 | `bridge-session` | `bridgeSessionId`, `lastSequenceNum` | Remote Control / cloud bridge linkage |
 | `frame-link` | `path`, `frameUrl`, `title` | Published artifact linked to a local file |
 | `summary` | `summary`, `leafUuid` | Compaction summary linking to the pre-compaction leaf |
 
-Observed `attachment.type` values: `hook_success`, `task_reminder`, `queued_command`, `hook_additional_context`, `edited_text_file`, `deferred_tools_delta`, `skill_listing`, `mcp_instructions_delta`, `command_permissions`, `agent_listing_delta`, `nested_memory`, `hook_system_message`, `date_change`, `goal_status`, `plan_mode`, `plan_mode_exit`, `plan_mode_reentry`, `read_truncation_notice`, `auto_mode`, `hook_cancelled`, `async_hook_response`, `hook_non_blocking_error`, `hook_permission_decision`, `budget_usd`, `ultrathink_effort`, `max_turns_reached`.
+Observed `attachment.type` values include `hook_success`, `task_reminder`, `queued_command`, `hook_additional_context`, `edited_text_file`, `deferred_tools_delta`, `skill_listing`, `mcp_instructions_delta`, `command_permissions`, `agent_listing_delta`, `nested_memory`, `hook_system_message`, `date_change`, `goal_status`, `plan_mode`, `plan_mode_exit`, `plan_mode_reentry`, `read_truncation_notice`, `auto_mode`, `hook_cancelled`, `async_hook_response`, `hook_non_blocking_error`, `hook_permission_decision`, `budget_usd`, `ultrathink_effort`, `max_turns_reached`, `bash_output_audience_note`, `compact_file_reference`, `file`, `invoked_skills`, `silent_turn_reminder`, `task_status`, and `total_tokens_reminder`.
 
-Observed `system.subtype` values: `turn_duration` (`durationMs`, `messageCount`), `stop_hook_summary` (`hookCount`, `hookErrors`, `preventedContinuation`, …), `away_summary`, `local_command`, `model_refusal_fallback` (`originalModel`, `fallbackModel`, `apiRefusalCategory`), `informational`, `agents_killed`, `scheduled_task_fire`.
+Observed `system.subtype` values: `turn_duration` (`durationMs`, `messageCount`), `stop_hook_summary` (`hookCount`, `hookErrors`, `preventedContinuation`, …), `away_summary`, `local_command`, `model_refusal_fallback` (`originalModel`, `fallbackModel`, `apiRefusalCategory`), `informational`, `agents_killed`, `scheduled_task_fire`, and `compact_boundary` (with `compactMetadata`).
 
-Rarer metadata line types the binary also writes and its reader skips (none present in this corpus): `ended-by-model`, `agent-color`, `isolation-latch`, `attribution-snapshot`, `content-replacement`, `fork-context-ref`, `observer-ref`, `marble-origami-commit|snapshot|reset`. Treat any unrecognized `.type` as skippable — the conversation lives entirely in `user`/`assistant`.
+Current observed metadata types also include `atis-latch`, `history-suppression`, `artifact-autoreact-ledger`, and `artifact-comment-monitor`. `history-suppression` may record `migration` or `restored_owner_mismatch`. `started` and `result` occur only in `subagents/journal.jsonl`, not in transcript conversations. Treat any unrecognized `.type` as skippable — the conversation lives entirely in `user`/`assistant`.
 
 ## Common fields
 
@@ -165,6 +169,7 @@ Rarer metadata line types the binary also writes and its reader skips (none pres
 - Live at `<project-slug>/<session-id>/subagents/agent-<agent-id>.jsonl`, same schema as main transcripts, every entry `isSidechain: true`.
 - `agent-<agent-id>.meta.json`: `{ "agentType": "general-purpose", "description": "…", "toolUseId": "toolu_…", "spawnDepth": 1 }`, plus `parentAgentId` for nested subagents (`spawnDepth: 2`), and optionally `model` and `stoppedByUser`. `toolUseId` matches the `tool_use` block (`name: "Agent"`/`"Task"`) in the parent transcript.
 - Nested subagents live in the same flat `subagents/` directory; use `parentAgentId` / `spawnDepth` to rebuild the tree.
+- `journal.jsonl` records `started` and `result` lifecycle events; do not merge it with `agent-<id>.jsonl` when exporting conversation.
 - Older versions wrote sidechains inline in the main transcript with `isSidechain: true`; current versions write separate files. Handle both when walking history.
 
 ## Global history.jsonl
@@ -183,7 +188,7 @@ One line per prompt typed, across all projects:
 - Transcripts auto-clean after `cleanupPeriodDays` (default 30, minimum 1) — recoverable history is bounded; a session's `subagents/` and `tool-results/` age out with it. `history.jsonl`, `stats-cache.json` and other "kept until you delete them" paths persist indefinitely.
 - `claude project purge [path]` deletes one project's transcripts, memory, `tasks/`, `debug/`, `file-history/`, its `history.jsonl` lines, and its `~/.claude.json` entry (`--dry-run`, `--yes`, `--all`, `-i`).
 - `CLAUDE_CODE_SKIP_PROMPT_HISTORY=1` skips writing transcripts and prompt history entirely; `--no-session-persistence` does the same for a single `-p` run.
-- `claude --resume <id|title>` / `--continue` / `--from-pr <n>` / `--fork-session` reopen sessions; `/compact` writes a `summary` entry; `/export <file>` dumps readable text.
+- `claude --resume <id|title>` / `--continue` reopen sessions. `--fork-session` creates a new session, then requires resume/continue. `--from-pr` accepts a PR number or URL, or opens a picker. `/compact` writes a `summary` entry; `/export` accepts an optional filename or copies to the clipboard.
 - `/resume` hides sessions with `isSidechain: true`, a `teamName`, `sessionKind` of `daemon`/`daemon-worker`, `/loop` sessions, and any `entrypoint` in `sdk-cli`/`sdk-ts`/`sdk-py`. They are all still on disk — read them directly.
 - Legacy, no longer written: `~/.claude/todos/`, `statsig/`, `logs/`, and stray `<session-id>.jsonl.backup` files (1.0.x era). `~/.claude/sessions/` is current: one `<pid>.json` per *running* session, removed on exit.
-- Desktop-app and claude.ai/code (web) sessions are not stored under `~/.claude/projects/`; only CLI/IDE-terminal sessions appear there.
+- This CLI-focused tree does not establish a claim about every Desktop/web storage surface. Desktop uses its separate `desktopSessionCleanupPeriodDays` retention setting; CLI cleanup uses `cleanupPeriodDays`.
