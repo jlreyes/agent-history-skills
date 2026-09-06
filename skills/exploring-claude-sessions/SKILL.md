@@ -58,10 +58,12 @@ for f in "$PROJ"/*.jsonl; do
     (map(select(.type=="ai-title")) | last | .aiTitle) as $aiTitle |
     map(select(.type=="user")) as $u |
     (($u | map(select(.promptSource=="typed")) | first)
+      // ($u | map(select((.isMeta != true) and (.toolUseResult == null))) | first)) as $meta |
+    (($u | map(select(.promptSource=="typed")) | first)
       // (map(select(.type=="last-prompt")) | last)
-      // ($u | map(select((.isMeta != true) and (.toolUseResult == null) and (.message.content | tostring | startswith("<") | not))) | first)) as $p |
-    select($p != null) |
-    "\($p.timestamp[:16])  \($id[:8])  \($p.gitBranch // "?")  \($agentName // $customTitle // $aiTitle // "-")  |  \($p | txt | flat | .[:70])"
+      // $meta) as $preview |
+    select($meta != null and $preview != null) |
+    "\($meta.timestamp[:16])  \($id[:8])  \($meta.gitBranch // "?")  \($agentName // $customTitle // $aiTitle // "-")  |  \($preview | txt | flat | .[:70])"
   ' "$f" 2>/dev/null
 done | sort -r
 ```
@@ -73,12 +75,14 @@ Preferring `promptSource=="typed"` skips injected first lines (`<local-command-c
 Fast path — grep raw lines first, then inspect hits. Include the subagent dirs; a lot of work happens there:
 
 ```bash
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 grep -rl "KEYWORD" "$CLAUDE_ROOT"/projects/*/*.jsonl "$CLAUDE_ROOT"/projects/*/*/subagents/*.jsonl 2>/dev/null
 ```
 
 Or search only what the *user* typed, via `$CLAUDE_ROOT/history.jsonl` — which now carries `sessionId`, so a hit points straight at a transcript:
 
 ```bash
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 jq -r 'select(.display | test("KEYWORD"; "i")) |
   "\(.timestamp/1000 | todate)  \(.sessionId // "-")  \(.project)  \(.display[:80])"' "$CLAUDE_ROOT/history.jsonl" | tail -30
 ```
@@ -86,6 +90,8 @@ jq -r 'select(.display | test("KEYWORD"; "i")) |
 ### Dump a session as readable markdown
 
 ```bash
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+PROJ="$CLAUDE_ROOT/projects/-Users-me-repos-Foo"
 jq -r '
   def txt: [.message.content | if type=="string" then . else (.[]? | select(.type=="text") | (.text // .content)) end] | join("\n");
   def tools: [.message.content | arrays | .[]? | select(.type=="tool_use") | .name] | join("\n  ");
@@ -102,6 +108,7 @@ Same command works on `<session-id>/subagents/agent-*.jsonl`.
 ### Find which session touched a file
 
 ```bash
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 grep -l '"file_path":"[^"]*FILENAME' "$CLAUDE_ROOT"/projects/*/*.jsonl "$CLAUDE_ROOT"/projects/*/*/subagents/*.jsonl 2>/dev/null
 ```
 
@@ -110,6 +117,7 @@ Then confirm by extracting the matching `tool_use` blocks from the hit (see dump
 ### Resolve a partial session ID
 
 ```bash
+CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 ls "$CLAUDE_ROOT"/projects/*/SESSION_PREFIX*.jsonl 2>/dev/null
 ```
 

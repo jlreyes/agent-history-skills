@@ -147,9 +147,9 @@ done | sort -t'|' -rn | head -30
 
 (Qualify `t.key` — `json_each` emits its own `key` column. Nothing newer than the 3.0 cutover appears here; always check the global DB first.)
 
-## Plaintext export (no SQLite at all)
+## Safe text export (no SQLite at all)
 
-Each line is one JSON record: role messages are `{role:"user"|"assistant", message:{content:[…]}}`; controls are `{type:"turn_ended",status:"success"}` or add `error` with `status:"aborted"`. Iterate all blocks and skip records without a `role`. No `tool_result` part was observed in the 46-file corpus.
+Each line is one JSON record: role messages are `{role:"user"|"assistant", message:{content:[…]}}`; controls are `{type:"turn_ended",status:"success"}` or add `error` with `status:"aborted"`. This safe text export emits tool names only: inputs and results can expose commands, paths, queries, edits, or secrets. It is intentionally not byte-complete; inspect selected input fields only when explicitly needed. No `tool_result` part was observed in the 46-file corpus.
 
 ```bash
 jq -r 'select(.role) | .role + ": " +

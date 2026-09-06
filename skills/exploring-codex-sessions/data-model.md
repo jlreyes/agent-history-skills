@@ -49,7 +49,7 @@ From `RolloutItem` (protocol.rs, `tag="type" content="payload"`, snake_case), `T
 
 Wrapped corpora observe `session_meta`, `response_item`, `turn_context`, `world_state`, `compacted`, `event_msg`, `inter_agent_communication_metadata`, and `token_usage_record`; plain inter-agent, security-score, and realtime variants are source-only/unobserved. Historical `ghost_snapshot` is ignored/stripped by current readers.
 
-The following examples and persistence counts in this legacy section describe the historical 0.146 corpus; use current paginated records above for current writers.
+The following examples and persistence counts in this legacy section describe the historical 0.146 corpus; use the current pagination section below for current writers.
 
 `world_state`, `inter_agent_communication` and `inter_agent_communication_metadata` are **new since 0.137** (which had exactly five variants). The five original variants are unchanged in name and payload, so older rollouts remain readable by a current reader.
 

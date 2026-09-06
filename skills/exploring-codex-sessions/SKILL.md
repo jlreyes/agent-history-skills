@@ -2,7 +2,7 @@
 name: exploring-codex-sessions
 description: Finds and explores OpenAI Codex CLI conversation history stored locally as JSONL rollout files. Use when the user asks to find, search, read, export, or resume a Codex CLI session, rollout, thread, or transcript.
 compatibility: Requires jq; sqlite3 and ripgrep recommended. Paths are macOS/Linux.
-allowed-tools: Bash(jq *) Bash(sqlite3 *) Bash(rg *) Bash(find *) Bash(zstdcat *) Bash(zstdgrep *) Bash(head *) Bash(sort *) Bash(tail *) Bash(ls *) Bash(codex *)
+allowed-tools: Bash(jq *) Bash(sqlite3 *) Bash(rg *) Bash(find *) Bash(zstdcat *) Bash(zstdgrep *) Bash(head *) Bash(sort *) Bash(tail *) Bash(ls *) Bash(cut *) Bash(codex *)
 metadata:
   author: jlreyes
 ---
@@ -24,7 +24,7 @@ Set `CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"` and `CODEX_DB_ROOT="${CODEX_SQLIT
 | `$CODEX_ROOT/session_index.jsonl` | Thread names: `{"id", "thread_name", "updated_at"}`, last entry wins |
 | `$CODEX_ROOT/config.toml` | `[history] persistence = "save-all"\|"none"` |
 
-Sessions are **never auto-deleted** (`codex archive` / `codex delete` are manual). Rollouts may be zstd-compressed to `.jsonl.zst`; search them only when `zstdcat` is available. The SQLite root follows `CODEX_SQLITE_HOME`, then `CODEX_HOME`; do not assume `CODEX_HOME` relocates every store. `session_index.jsonl` is an append-only compatibility index; prefer SQLite where available.
+Sessions are **never auto-deleted** (`codex archive` / `codex delete` are manual). Rollouts may be zstd-compressed to `.jsonl.zst`; search them when `zstdgrep` or `zstdcat` is available. The SQLite root follows `CODEX_SQLITE_HOME`, then `CODEX_HOME`; do not assume `CODEX_HOME` relocates every store. `session_index.jsonl` is an append-only compatibility index; prefer SQLite where available.
 
 ## Rollout schema (quick reference)
 
@@ -47,6 +47,8 @@ Every wrapped line is a rollout envelope, optionally carrying sequential `ordina
 ### List recent sessions (fast path, via the index)
 
 ```bash
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+CODEX_DB_ROOT="${CODEX_SQLITE_HOME:-$CODEX_ROOT}"
 sqlite3 -separator ' | ' "$CODEX_DB_ROOT/state_5.sqlite" \
   "SELECT datetime(updated_at,'unixepoch','localtime'), substr(id,1,13), cwd,
           substr(replace(first_user_message,char(10),' '),1,60)
@@ -58,8 +60,12 @@ Use 13 id chars, not 8 — UUIDv7 prefixes collide for sessions started in the s
 ### List recent sessions (filesystem only — works on every version)
 
 ```bash
-find "$CODEX_ROOT/sessions" "$CODEX_ROOT/archived_sessions" -name 'rollout-*.jsonl' -print 2>/dev/null | sort | tail -20
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+find "$CODEX_ROOT/sessions" "$CODEX_ROOT/archived_sessions" \( -name 'rollout-*.jsonl' -o -name 'rollout-*.jsonl.zst' \) -print 2>/dev/null |
+  while IFS= read -r f; do printf '%s\t%s\n' "${f##*/}" "$f"; done |
+  sort | tail -20 | cut -f2-
 # Wrapped legacy cwd/prompt probes (use the dump recipe for paginated files; see the era doc for bare files):
+# For a compressed FILE, pipe `zstdcat FILE` into the jq probes instead of reading it directly.
 head -1 FILE | jq -r '.payload.cwd // .cwd // "?"'
 jq -r 'select(.type=="event_msg" and .payload.type=="user_message") | .payload.message' FILE | head -1
 ```
@@ -67,6 +73,7 @@ jq -r 'select(.type=="event_msg" and .payload.type=="user_message") | .payload.m
 ### Search all sessions for a keyword
 
 ```bash
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
 rg -l --glob 'rollout-*.jsonl' 'KEYWORD' "$CODEX_ROOT/sessions" "$CODEX_ROOT/archived_sessions"
 # or search only what the user typed, with session IDs — but check freshness first:
 ls -l "$CODEX_ROOT/history.jsonl"
@@ -80,6 +87,8 @@ This covers uncompressed active and archived files. For `.zst` rollouts, require
 ### Resolve a logical session to its current rollout
 
 ```bash
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+CODEX_DB_ROOT="${CODEX_SQLITE_HOME:-$CODEX_ROOT}"
 case "$ID" in (*[!0-9a-fA-F-]*|'') echo 'Invalid ID prefix' >&2; exit 2;; esac
 sqlite3 -separator ' | ' "$CODEX_DB_ROOT/state_5.sqlite" \
   "SELECT id, rollout_path FROM threads WHERE id LIKE '${ID}%';"
@@ -91,15 +100,20 @@ sqlite3 -separator ' | ' "$CODEX_DB_ROOT/state_5.sqlite" \
 jq empty FILE >/dev/null || {
   echo 'Malformed rollout: use the current projection/migration or explicitly repair it first.' >&2; exit 1;
 }
-jq -r 'select(.type=="event_msg") | .payload |
-  if .type=="user_message" then "## User\n\n\(.message)\n"
-  elif .type=="agent_message" and ((.phase//"final")!="commentary") then "## Codex\n\n\(.message)\n"
-  elif .type=="item_completed" and .item.type=="UserMessage" then "## User\n\n" + ([.item.content[]? | select(.type=="text") | .text] | join("\n")) + "\n"
-  elif .type=="item_completed" and .item.type=="AgentMessage" and ((.item.phase//"final")!="commentary") then "## Codex\n\n" + ([.item.content[]? | select(.type=="Text") | .text] | join("\n")) + "\n"
+jq -r '
+  if .type=="event_msg" then .payload |
+    if .type=="user_message" then "## User\n\n\(.message)\n"
+    elif .type=="agent_message" and ((.phase//"final")!="commentary") then "## Codex\n\n\(.message)\n"
+    elif .type=="item_completed" and .item.type=="UserMessage" then "## User\n\n" + ([.item.content[]? | select(.type=="text") | .text] | join("\n")) + "\n"
+    elif .type=="item_completed" and .item.type=="AgentMessage" and ((.item.phase//"final")!="commentary") then "## Codex\n\n" + ([.item.content[]? | select(.type=="Text") | .text] | join("\n")) + "\n"
+    elif .type=="item_completed" and (.item.type=="CollabAgentToolCall" or .item.type=="CommandExecution" or .item.type=="DynamicToolCall" or .item.type=="FileChange" or .item.type=="ImageView" or .item.type=="McpToolCall" or .item.type=="WebSearch") then "  [tool] \(.item.type)\n"
+    else empty end
+  elif .type=="response_item" and (.payload.type=="function_call" or .payload.type=="custom_tool_call" or .payload.type=="tool_search_call") then
+    "  [tool] \(.payload.name // .payload.type)\n"
   else empty end' FILE
 ```
 
-For tool calls, render names only: `function_call`, `custom_tool_call`, and `tool_search_call` names are useful; never export their arguments or results. This reader is current-first and also handles legacy events; see [data-model.md](data-model.md) for older bare rollouts.
+Tool activity renders only its name or paginated category; arguments and results are intentionally omitted. This reader is current-first and also handles legacy events; see [data-model.md](data-model.md) for older bare rollouts.
 
 ### Resume, fork, and manage a found session
 
