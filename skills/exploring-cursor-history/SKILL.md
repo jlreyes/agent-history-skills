@@ -1,19 +1,19 @@
 ---
 name: exploring-cursor-history
 description: Finds and explores Cursor IDE conversation history stored locally in SQLite databases and plaintext agent transcripts. Use when the user asks to find, search, read, or export a Cursor chat session, agent conversation, composer thread, or transcript.
-compatibility: Requires sqlite3 CLI and jq. IDE paths below are macOS; on Linux the IDE data root is ~/.config/Cursor, on Windows %APPDATA%\Cursor. The CLI tree is ~/.cursor on every platform (Linux/BSD honours $XDG_CONFIG_HOME/cursor; $CURSOR_CONFIG_DIR overrides everywhere).
-allowed-tools: Bash(sqlite3 *) Bash(jq *)
+compatibility: Requires sqlite3 CLI and jq. IDE paths below are macOS; on Linux the IDE data root is ~/.config/Cursor, on Windows %APPDATA%\Cursor. The CLI root defaults to ~/.cursor (Linux/BSD honours $XDG_CONFIG_HOME/cursor; $CURSOR_CONFIG_DIR overrides everywhere).
+allowed-tools: Bash(sqlite3 *) Bash(jq *) Bash(find *) Bash(sort *) Bash(head *) Bash(sed *) Bash(dirname *)
 metadata:
   author: jlreyes
 ---
 
 # Exploring Cursor History
 
-Cursor stores IDE conversations in SQLite (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). The CLI (`agent`) stores its own sessions under `~/.cursor`. Query them directly with `sqlite3`; the recipes below are building blocks — swap the `json_extract` paths for any field in [data-model.md](data-model.md).
+Cursor stores IDE conversations in SQLite (`state.vscdb`), with the **global DB as the single source of truth** — workspace DBs only hold legacy metadata (pre-3.0). The CLI (`agent`) stores its own sessions under a root that defaults to `~/.cursor`. Current official releases are Desktop 3.19 / CLI 2026.09.02-c22c1a3; local schema evidence is Desktop 3.15.6 and CLI through 2026.08.04 because current live generation did not complete.
 
 ## Storage locations
 
-IDE paths are shown for macOS (`~/Library/Application Support/Cursor` → `~/.config/Cursor` on Linux, `%APPDATA%\Cursor` on Windows). `~/.cursor` is the same on all platforms.
+IDE paths are shown for macOS (`~/Library/Application Support/Cursor` → `~/.config/Cursor` on Linux, `%APPDATA%\Cursor` on Windows). The CLI root defaults to `~/.cursor`; substitute the XDG or `CURSOR_CONFIG_DIR` override when configured.
 
 | Path | What it holds |
 |------|---------------|
@@ -29,12 +29,12 @@ IDE paths are shown for macOS (`~/Library/Application Support/Cursor` → `~/.co
 
 Global DB, `cursorDiskKV` table (key/value):
 
-- `composerData:<composerId>` — one row per conversation: `name`, `subtitle`, `createdAt`/`lastUpdatedAt` (epoch ms; **lastUpdatedAt is unreliable** — the last bubble's `createdAt` is the true recency signal), `unifiedMode` (`agent`|`chat`|`plan`|`edit`), and `fullConversationHeadersOnly[]` — the ordered message list: `{bubbleId, type}` (1=user, 2=assistant). `workspaceIdentifier` is **almost never present** (4 of 2473 rows here) — attribute projects via the `composerHeaders` table, the legacy workspace lookup, or the `~/.cursor/projects` slug.
+- `composerData:<composerId>` — one row per conversation: `name`, `subtitle`, `unifiedMode` (`agent`/`chat`/`plan`/`edit`), `createdAt`/`lastUpdatedAt` (epoch ms). The last bubble's `createdAt` is exact only when present; it was absent for 447/990 nonempty conversations. Fall back to `lastUpdatedAt`/`createdAt` as approximate. `fullConversationHeadersOnly[]` is the ordered message list: `{bubbleId, type}` (1=user, 2=assistant). `workspaceIdentifier` is **almost never present** (4 of 2473 rows here) — attribute projects via the `composerHeaders` table, the legacy workspace lookup, or the `~/.cursor/projects` slug.
 - `bubbleId:<composerId>:<bubbleId>` — one row per message: `text` (only on text turns), `type`, `createdAt` (ISO, often absent), `toolFormerData` (`{name, params, result, status}` — tool calls), `thinking.text` (reasoning), `codeBlocks`, `context` (file selections etc.)
 
 Global DB, `composerHeaders` table (added ~Cursor 3.9): `(composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, recency, checkpointAt, value)` — a forward-only index with a precomputed `recency` and real workspace attribution, but **only for conversations created after the migration** (26 rows vs 990 conversations with content here). Use it to filter/attribute recent chats; use `composerData:%` for the full history.
 
-**Iterate via headers, not raw bubble rows** — orphan bubbles from regenerated/deleted turns exist (56,649 bubble rows vs 51,732 header refs here). Always open DBs read-only (`file:...?mode=ro`). In `sqlite3` shell arguments, escape JSON paths as `'\$.field'` so the shell doesn't mangle them.
+**Iterate via headers, not raw bubble rows** — orphan non-null bubbles from regenerated/deleted turns were observed; headers remain authoritative. Always open DBs read-only (`file:...?mode=ro`). In `sqlite3` shell arguments, escape JSON paths as `'\$.field'` so the shell doesn't mangle them.
 
 All queries below assume:
 
@@ -54,22 +54,25 @@ sqlite3 "file:$GLOBAL_DB?mode=ro" \
 
 ```bash
 sqlite3 -separator ' | ' "file:$GLOBAL_DB?mode=ro" "
-  SELECT datetime(json_extract(value,'\$.createdAt')/1000,'unixepoch','localtime'),
-         substr(key,14,12),
-         json_extract(value,'\$.unifiedMode'),
-         coalesce(nullif(json_extract(value,'\$.name'),''), json_extract(value,'\$.subtitle'), '?')
-  FROM cursorDiskKV
-  WHERE key LIKE 'composerData:%'
-    AND json_array_length(value,'\$.fullConversationHeadersOnly') > 0
+  SELECT datetime(json_extract(c.value,'\$.createdAt')/1000,'unixepoch','localtime'),
+         substr(c.key,14,12),
+         json_extract(c.value,'\$.unifiedMode'),
+         coalesce(nullif(json_extract(c.value,'\$.name'),''), json_extract(c.value,'\$.subtitle'), '?')
+  FROM cursorDiskKV c
+  WHERE c.key LIKE 'composerData:%'
+    AND json_array_length(c.value,'\$.fullConversationHeadersOnly') > 0
   ORDER BY 1 DESC LIMIT 30;"
 ```
 
-To sort by true last activity instead of creation, order by the last bubble's timestamp (`[#-1]` = last array element):
+To sort by best-available last activity, order by the last bubble's timestamp (`[#-1]` = last array element), then fall back to composer timestamps:
 
 ```sql
-(SELECT json_extract(b.value,'$.createdAt') FROM cursorDiskKV b
- WHERE b.key = 'bubbleId:' || substr(c.key,14) || ':' ||
-       json_extract(c.value,'$.fullConversationHeadersOnly[#-1].bubbleId'))
+coalesce(
+  (SELECT unixepoch(json_extract(b.value,'$.createdAt')) * 1000 FROM cursorDiskKV b
+   WHERE b.key = 'bubbleId:' || substr(c.key,14) || ':' ||
+         json_extract(c.value,'$.fullConversationHeadersOnly[#-1].bubbleId')),
+  json_extract(c.value,'$.lastUpdatedAt'),
+  json_extract(c.value,'$.createdAt'))
 ```
 
 For conversations created since the `composerHeaders` migration, that work is already done — and this is the only place with reliable workspace attribution and a subagent flag:
@@ -98,7 +101,7 @@ sqlite3 "file:$GLOBAL_DB?mode=ro" "
   ORDER BY j.key;"
 ```
 
-Add `json_extract(b.value,'$.thinking.text')` for reasoning, `'$.createdAt'` for timestamps, or `'$.toolFormerData.result'` (truncate it — results are large) as needed.
+Add `json_extract(b.value,'$.thinking.text')` for reasoning or `'$.createdAt'` for timestamps. Tool results can be large and may contain sensitive material; do not export them by default.
 
 ## Search conversations
 
@@ -146,38 +149,39 @@ done | sort -t'|' -rn | head -30
 
 ## Plaintext export (no SQLite at all)
 
-Each line is one JSON record: turn records `{"role":…,"message":{"content":[…]}}` plus `{"type":"turn_ended","status":"success"}` control records. Content blocks are `{"type":"text",…}` or `{"type":"tool_use","name":…,"input":…}` — iterate all blocks and skip records without a `role`, otherwise tool-call turns vanish and `turn_ended` prints a stray `: `:
+Each line is one JSON record: role messages are `{role:"user"|"assistant", message:{content:[…]}}`; controls are `{type:"turn_ended",status:"success"}` or add `error` with `status:"aborted"`. Iterate all blocks and skip records without a `role`. No `tool_result` part was observed in the 46-file corpus.
 
 ```bash
 jq -r 'select(.role) | .role + ": " +
   ([.message.content[]
     | if .type=="text" then .text
-      elif .type=="tool_use" then "[tool_use "+.name+" "+(.input|tostring)+"]"
+      elif .type=="tool_use" then "[tool_use "+.name+"]"
       else "["+.type+"]" end] | join("\n"))' \
   ~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl
 ```
 
-`<slug>` = workspace absolute path with the leading `/` dropped and remaining `/` → `-`. User turns wrap the prompt as `<timestamp>…</timestamp>\n<user_query>\n…\n</user_query>`. Tool **results** are not stored — only the `tool_use` call.
+`<slug>` = workspace absolute path with the leading `/` dropped and remaining `/` → `-`. In the observed corpus, 20/100 user records wrapped the prompt as `<timestamp>…</timestamp>\n<user_query>\n…\n</user_query>`. No `tool_result` part was observed; the JSONLs did contain `tool_use` calls.
 
 ## Cursor CLI (`agent`) sessions
 
 A headless run writes both the JSONL transcript above **and** `~/.cursor/chats/<md5(workspacePath)>/<sessionId>/store.db` + `meta.json`. `<sessionId>` is the `session_id` from `--output-format json`. `--continue`/`--resume` rewrite the JSONL with the full conversation. List sessions without the TUI:
 
 ```bash
-for m in ~/.cursor/chats/*/*/meta.json; do
-  jq -r --arg d "$(dirname "$m")" '"\(.updatedAtMs)  \($d|split("/")|last)  \(.cwd // "?")"' "$m"
-done | sort -rn
+find ~/.cursor/chats -type f -name meta.json -print0 2>/dev/null |
+  while IFS= read -r -d '' m; do
+    jq -r --arg d "$(dirname "$m")" '"\(.updatedAtMs)  \($d|split("/")|last)  \(.cwd // "?")"' "$m"
+  done | sort -rn
 ```
 
 `store.db` is a content-addressed blob store (`blobs`, `meta`); the JSONL is the readable surface — see [data-model.md](data-model.md#cli-agent-store-storedb) before touching it.
 
 ## Tips
 
-- Tool-call turns have empty `text` — render `toolFormerData.name` instead. The legacy `toolResults` / `suggestedCodeBlocks` / `assistantSuggestedDiffs` fields still exist on every bubble but are **always empty arrays**; don't read them.
-- Tool names differ per surface: the DB uses internal names (`read_file_v2`, `ripgrep_raw_search`, `run_terminal_command_v2`), the JSONL uses display names (`Read`, `Grep`, `Shell`). They map 1:1.
+- Tool-call turns have empty `text` — render `toolFormerData.name` instead. The legacy `toolResults` / `suggestedCodeBlocks` / `assistantSuggestedDiffs` fields still exist on the 56,085 versioned bubble objects but are **always empty arrays**; don't read them.
+- Tool names differ per surface: the DB uses internal names (`read_file_v2`, `ripgrep_raw_search`, `run_terminal_command_v2`); observed JSONL display names are `AwaitShell`, `Delete`, `GetMcpTools`, `Glob`, `Grep`, `Read`, `ReadLints`, `Shell`, `StrReplace`, `TodoWrite`, `WebFetch`, `WebSearch`, and `Write`.
 - The JSONL mirror is *not* a complete history — only 33 of 990 conversations with content had one here (it starts around Cursor 3.0). Use the DB when a conversation is missing.
 - Sub-agent threads are full `composerData` rows too (listed in the parent's `subagentComposerIds`), so they show up in "list recent conversations" — filter with `composerHeaders.isSubagent` when you only want top-level chats.
 - Map a composerId to its project via `composerHeaders.workspaceId` / `value.workspaceIdentifier.uri.fsPath`, the legacy workspace lookup, or by which `~/.cursor/projects/<slug>/agent-transcripts/` directory contains it.
-- `agent ls` / `agent resume` exist but are hidden Ink TUIs that need a real TTY — piped they hang after "Raw mode is not supported". For scripting use `agent about --format json` / `agent status --format json`, or read `~/.cursor/chats` and the JSONL directly.
+- Current help visibly lists `agent create-chat`, `agent ls`, `agent resume`, and `agent persist list|attach|stop`; persist manages detached processes, not export. On the older 2026.08.04 CLI, `ls`/`resume` were Ink TUIs that could hang under piped stdin. There is no export/history/sessions subcommand.
 - Cloud/background agents (`bc-*` IDs) keep almost nothing locally — only the title is cached, in `conversation-search.db` as `source='cloud-cache'`; transcripts are server-side.
 - A conversation that shows "Chat Too Old" in the UI is still fully readable from the DB; only its server `conversationState` token is lost.

@@ -1,6 +1,6 @@
 # Cursor Conversation Storage — Data Model
 
-Verified on **macOS** against the **Cursor IDE 3.13.21** and **Cursor CLI `2026.08.04-aaa8809`** on **2026-08-09**, by querying the real global/workspace databases read-only (2,553 `composerData` rows, 56,649 bubble rows) and by running live `agent -p` sessions. Cursor 3.0 (April 2026) moved conversation metadata from workspace DBs into the global DB; the legacy model is documented at the bottom because old conversations still use it. Cursor 3.11 (July 2026) added the `conversation-search.db` FTS index.
+Official current releases on 2026-09-06 are Desktop **3.19** and CLI **2026.09.02-c22c1a3**. Storage evidence is Desktop **3.15.6** and CLI **2026.08.04-aaa8809**; current CLI help/version was verified, but current live generation did not complete. Cursor 3.0 moved conversation metadata from workspace DBs into the global DB; Cursor 3.11 added `conversation-search.db` FTS.
 
 ## Contents
 
@@ -17,10 +17,10 @@ Verified on **macOS** against the **Cursor IDE 3.13.21** and **Cursor CLI `2026.
 
 ## Locations
 
-Two roots. The **IDE data root** is VS Code global storage: macOS `~/Library/Application Support/Cursor`, Linux `~/.config/Cursor`, Windows `%APPDATA%\Cursor`. The **CLI root** is `~/.cursor` on every platform — per the [CLI config docs](https://cursor.com/docs/cli/reference/configuration), Linux/BSD use `$XDG_CONFIG_HOME/cursor` when that variable is set, and `$CURSOR_CONFIG_DIR` overrides everywhere. `~/.cursor` also holds IDE-written artifacts (plans, transcripts, prompt history), so both products share it.
+Two roots. The **IDE data root** is VS Code global storage: macOS `~/Library/Application Support/Cursor`, Linux `~/.config/Cursor`, Windows `%APPDATA%\Cursor`. The **CLI root** defaults to `~/.cursor` — per the [CLI config docs](https://cursor.com/docs/cli/reference/configuration), Linux/BSD use `$XDG_CONFIG_HOME/cursor` when that variable is set, and `$CURSOR_CONFIG_DIR` overrides everywhere. The default root also holds IDE-written artifacts (plans, transcripts, prompt history), so both products can share it.
 
 - **Global DB**: `<IDE root>/User/globalStorage/state.vscdb` — tables `ItemTable` and `cursorDiskKV`, both `(key TEXT UNIQUE, value BLOB)`, plus a `composerHeaders` table. All conversation content lives here. Siblings: `state.vscdb.backup`, `state.vscdb.options.json` (`{"useWAL": true}`), `conversation-search.db`.
-- **Workspace DBs**: `<IDE root>/User/workspaceStorage/<hash>/state.vscdb` + `workspace.json` sibling: `{"folder": "file:///path"}` — or `{"workspace": "..."}` for multi-root `.code-workspace` setups (174 vs 4 here). Workspace `cursorDiskKV` is empty in all 179 dirs, and the `composerHeaders` table (created in 4 recently-opened workspaces) is empty too; only legacy `ItemTable` keys matter.
+- **Workspace DBs**: `<IDE root>/User/workspaceStorage/<hash>/state.vscdb` + `workspace.json`: 174 folder mappings, 4 workspace mappings, and one unmapped. Nine are `ItemTable` only; 166 also have empty `cursorDiskKV`; four additionally have empty `composerHeaders`. Only legacy `ItemTable` keys matter.
 - **`~/.cursor/`**: plaintext transcripts, CLI session stores, and newer artifacts (see below).
 
 Always open read-only: `sqlite3 "file:$DB?mode=ro"` — this also sees WAL'd recent writes while Cursor runs.
@@ -56,14 +56,15 @@ Always open read-only: `sqlite3 "file:$DB?mode=ro"` — this also sees WAL'd rec
 - `name` on 73% of rows, `lastUpdatedAt` on 73%, `unifiedMode` on 68%, `subtitle` on 25%. Values: `agent` 1182, `chat` 474, `plan` 16, `edit` 7.
 - **`workspaceIdentifier` is effectively absent** — 4 of 2,473 rows. Use the [`composerHeaders` table](#global-db-composerheaders-table), the [legacy workspace lookup](#legacy-model-pre-30), or the `~/.cursor/projects` slug for project attribution.
 - `gitWorktree` (7 rows), `activeCustomMode` / `pendingExitedCustomMode` (`_v: 17` only), `filesChangedCount` / `agentBackend` (`_v: 16` and older) are all optional.
-- `lastUpdatedAt` often ≈ `createdAt` — for true recency use the last bubble's `createdAt`, or `composerHeaders.recency`.
-- Rows with an empty `fullConversationHeadersOnly` are drafts/empty tabs (1,483 of 2,473 here).
+- For recency, use the last bubble's `createdAt` when present; otherwise fall back to `lastUpdatedAt`/`createdAt`. `composerHeaders.recency` is available for 26 rows.
+- Composer versions: no `_v` 943; v1 13; v3 104; v6 240; v8 19; v9 334; v10 744; v11 20; v14 35; v16 14; v17 7; plus 80 `NULL` tombstones.
+- `composerData` has 2,553 keys: 2,473 objects and 80 `NULL` tombstones. Rows with an empty `fullConversationHeadersOnly` are drafts/empty tabs; do not conflate absent-version rows with tombstones.
 - Sub-agent threads are ordinary `composerData` rows, referenced from the parent's `subagentComposerIds`; they appear in any naive listing.
 - Global `ItemTable` key `composer.composerHeaders` holds only the ~16 recently-open tabs (`{"allComposers":[…]}` with `type:"head"` entries), **not** the full index — enumerate `composerData:%` rows instead.
 
 ## Global DB: bubbles
 
-`cursorDiskKV` key `bubbleId:<composerId>:<bubbleId>` — one JSON blob per message. `_v` distribution: `3` × 54,967 (current), `2` × 1,118, absent × 564. ~100 keys are present on nearly every row; the ones that carry content:
+`cursorDiskKV` key `bubbleId:<composerId>:<bubbleId>` — one JSON blob per message. `bubbles` has 56,085 versioned objects (v2 1,118; v3 54,967), 2 unversioned tokenCount-only objects, and 562 `NULL` tombstones. Do not conflate absent-version records with tombstones.
 
 ```json
 {
@@ -86,14 +87,14 @@ Always open read-only: `sqlite3 "file:$DB?mode=ro"` — this also sees WAL'd rec
 
 - Population over the whole corpus: non-empty `text` 12,837 (23%); `toolFormerData` 36,479 (64%); non-empty `thinking.text` 18,803 (35% of the 53,643 assistant bubbles); `codeBlocks` 44,749; `richText` 2,452.
 - Message split: `type: 2` (assistant) 53,643, `type: 1` (user) 2,442; no other values.
-- The pre-3.0 fields `toolResults`, `suggestedCodeBlocks`, `assistantSuggestedDiffs` (and `allThinkingBlocks`) **still exist as keys on ~56,085 rows but are always empty arrays** — zero non-empty occurrences. Don't read them.
-- `toolFormerData` keys by frequency: `additionalData` 35,677, `toolCallId`/`tool`/`status`/`name` 23,195, `toolIndex`/`modelCallId` 23,136, `params` 23,098, `rawArgs` 22,629, `result` 22,041, `userDecision` 7,586, `toolCallBinary` 2,041, `attachments` 1,155, `error` 541. `status` ∈ {`completed` 22,367, `error` 540, `cancelled` 221, `loading` 67}. `params` and `result` are JSON **strings**, not objects.
+- The pre-3.0 fields `toolResults`, `suggestedCodeBlocks`, `assistantSuggestedDiffs` (and `allThinkingBlocks`) still exist on the 56,085 versioned objects but are always empty arrays. Don't read them.
+- `toolFormerData.params` is a JSON string. `result` has 22,036 strings plus five structured `todo_write` objects; render neither by default. `status` ∈ {`completed`, `error`, `cancelled`, `loading`}.
 - **13,284 `toolFormerData` objects carry no `name`** — they are the degenerate `{"additionalData":{"status":"error"}}` form. Guard with `coalesce(...)` when rendering.
 - `thinking` sub-keys: `text`, `signature` (19,110 each), plus `redactedThinking`/`isLastThinkingChunk` on 75.
 - Bubble `unifiedMode` is an **integer** (chat=1 ×299, agent=2 ×55,556, plan=5 ×230), unlike the string in composerData.
 - `createdAt` is an ISO string and is **often missing**: absent on all `_v: 2`/unversioned rows and on 19,049 of 54,967 `_v: 3` rows. Adjacent bubbles often share identical timestamps.
 - `richText` is **Lexical** editor state (`{"root":{"children":[…]}}`, 2,358 rows), not ProseMirror; 94 rows store plain text instead.
-- Orphan bubbles (no header reference) exist from regenerated/deleted turns — 56,649 bubble rows vs 51,732 header refs. Iterate headers.
+- Orphan bubbles from regenerated/deleted turns exist; iterate headers rather than raw bubble rows.
 
 ## Global DB: composerHeaders table
 
@@ -113,7 +114,7 @@ CREATE INDEX idx_composerHeaders_1 ON composerHeaders (recency, composerId);
 
 ## conversation-search.db (FTS index)
 
-`<IDE root>/User/globalStorage/conversation-search.db` — the local index behind Cursor 3.11's transcript search.
+`<IDE root>/User/globalStorage/conversation-search.db` — the local index behind Cursor 3.11's transcript search (`PRAGMA user_version=7`).
 
 ```sql
 CREATE TABLE conversations (fts_rowid INTEGER PRIMARY KEY,
@@ -154,23 +155,25 @@ Other useful global `ItemTable` keys: `composer.planRegistry` (array of plan slu
 
 | Path | Content |
 |---|---|
-| `projects/<path-slug>/agent-transcripts/<id>/<id>.jsonl` | Plaintext JSONL transcript of agent conversations — **both** IDE agent threads and CLI `agent` sessions. `<path-slug>` = workspace absolute path, leading `/` dropped, remaining `/` → `-` (verified: `/private/tmp/…/scratchpad/cursorlive` → `private-tmp-…-scratchpad-cursorlive`); IDE windows without a folder use the numeric window id or `empty-window`. Records: `{"role":"user"\|"assistant","message":{"content":[…]}}` and `{"type":"turn_ended","status":"success"}` — no other top-level shapes across all 35 files here. Content blocks: `{"type":"text","text":…}` (848) and `{"type":"tool_use","name":…,"input":…}` (82); **tool results are never persisted**. Tool `name`s are display names (`Read`, `Grep`, `Shell`, `Glob`, `Write`, `StrReplace`, `TodoWrite`, `WebSearch`) that map 1:1 onto the DB's internal `toolFormerData.name`. **Coverage is partial** — 33 of 990 conversations with content, starting ~2026-04-01 |
-| `projects/<slug>/agent-transcripts/<id>/subagents/<subagentId>.jsonl` | Sub-agent transcripts, same record shape; ids match the parent's `subagentComposerIds` |
+| `projects/<path-slug>/agent-transcripts/<id>/<id>.jsonl` | Top-level role messages (`user`/`assistant`) and `turn_ended` controls (`success`, or `aborted` with `error`); 35 files observed (22 IDE-matched, 13 CLI-only) |
+| `projects/<slug>/agent-transcripts/<id>/subagents/<subagentId>.jsonl` | Sub-agent transcripts, same record shape; 11 IDE-matched files observed; ids match the parent's `subagentComposerIds` |
 | `projects/<slug>/{agent-tools,terminals,canvases,mcps}/` | Sidecars: overflowed tool output (`.txt`), terminal state, canvas scratch files, MCP tool descriptors |
 | `projects/<slug>/{repo.json,mcp-auth.json,worker.log,worker.sock,.workspace-trusted}` | CLI per-workspace state; `.workspace-trusted` is written by `--trust` |
 | `chats/<md5>/<sessionId>/store.db` (+ `meta.json`) | CLI session store — see below |
 | `plans/<slug>.plan.md` | Plan-mode artifacts; indexed by global `ItemTable composer.planRegistry` |
-| `ai-tracking/ai-code-tracking.db` | AI attribution — `ai_code_hashes` (`hash`, `source`, `fileName`, `requestId`, `conversationId`, `model`), `scored_commits`, `tracking_state`, `conversation_summaries` (`conversationId`, `title`, `tldr`, `overview`, `summaryBullets`; empty here) |
+| `ai-tracking/ai-code-tracking.db` | AI attribution — `ai_code_hashes` (including `createdAt`), `ai_deleted_files`, `tracked_file_content`, `scored_commits`, `tracking_state`, and `conversation_summaries` (including `model`, `mode`, `updatedAt`) |
 | `prompt_history.json` | Rolling plain-string array of recent typed prompts — small and stale (9 entries here); not a history surface |
-| `cli-config.json` | CLI settings + `authInfo` (`email`, `displayName`, `userId`, `authId`); `agent-cli-state.json` holds version flags |
+| `cli-config.json` | CLI settings and optional `authInfo`; `agent-cli-state.json` holds version flags |
 | `hooks.json`, `ide_state.json`, `mcp.json`, `argv.json`, `statsig-cache.json` | Hook definitions, `recentlyViewedFiles`, MCP config, Electron argv, feature-flag cache |
 | `skills/`, `skills-cursor/`, `plugins/`, `agents/`, `workers/` | User skills, bundled Cursor skills, plugins, agent/worker definitions |
 | `worktrees/<repo>/<name>/` | Agent worktree checkouts (`agent -w`) |
 | `.gitignore` | Cursor-managed; un-ignores `projects/*/agent-transcripts/` and `projects/*/mcps/` so transcripts stay citable |
 
+Across both transcript paths: 46 files/1,183 records (1,166 messages: 1,066 assistant/100 user; 15 success/2 aborted; 936 text/673 tool-use parts). Observed display tools: `AwaitShell`, `Delete`, `GetMcpTools`, `Glob`, `Grep`, `Read`, `ReadLints`, `Shell`, `StrReplace`, `TodoWrite`, `WebFetch`, `WebSearch`, `Write`. No `tool_result` part was observed.
+
 ## CLI agent store (store.db)
 
-Verified live: `agent -p "…" --output-format json --force` writes **both** the JSONL transcript above **and** `~/.cursor/chats/<md5(workspaceAbsPath)>/<sessionId>/store.db` + `meta.json`. (`md5 "/…/scratchpad/cursorlive"` = `1d7dc78584615d02d18005a0d64da6a8`, matching the directory name.) `<sessionId>` is the `session_id` in the `--output-format json` result object.
+Previously live-verified on CLI 2026.08.04: `agent -p` writes both the JSONL transcript above and `~/.cursor/chats/<md5(workspaceAbsPath)>/<sessionId>/store.db` + `meta.json`.
 
 ```json
 // meta.json
@@ -184,12 +187,13 @@ CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
 CREATE TABLE meta  (key TEXT PRIMARY KEY, value TEXT);
 ```
 
-- **`meta`** — one row, `key='0'`, `value` = **hex-encoded** JSON (`xxd -r -p` to decode): `agentId` (= sessionId), `latestRootBlobId` (SHA-256 of the head blob), `name` (`"New Agent"`), `mode` (`"default"`), `isRunEverything`, `createdAt`, `blobEncryptionKey`.
-- **`blobs`** — content-addressed, `id` = SHA-256 of `data`. Two kinds: JSON message blobs starting `0x7B` (`{"role":"system"|"user"|"assistant","content":…}`; `content` is a string for system turns or an array of `text`/`redacted-reasoning` parts; `providerOptions.cursor.requestId` on user turns), and protobuf tree/index blobs starting `0x0A` (undecoded; readable `strings`: `system_prompt`, `tools`, `rules`, `skills`, `MCP`, `subagents`, `summarized_conversation`, `conversation`).
-- Blobs are **not chronologically ordered** — order is only recoverable by walking the protobuf tree. Read the JSONL mirror instead.
+- **`meta.json` sidecar** — 16 observed, all schemaVersion 1. `cwd` is optional (absent 3/16), as is `title`.
+- **`meta` table** — one row, `key='0'`, whose value is hex-encoded JSON. Optional keys include `agentId`, `approvalMode`, `blobEncryptionKey`, `createdAt`, `isRunEverything`, `lastUsedModel`, `latestRootBlobId`, `mode`, and `name`; observed modes are `default`, `search`, and `auto-run`.
+- **`blobs`** — content-addressed, `id` = SHA-256 of `data`. JSON message blobs have roles `system`/`user`/`assistant`/`tool`, content as string or array, and parts `reasoning`, `redacted-reasoning`, `text`, `tool-call`, or `tool-result`. Three structured non-message JSON blobs also occur. Non-JSON protobuf/binary blobs have observed first bytes `0A`, `12`, `1A`, `23`, `2D`, `2F`, `46`, `6E`.
+- Blobs are **not chronologically ordered** — order is only recoverable by walking the protobuf tree. Non-JSON blobs are protobuf/binary; their first byte is not universally `0x0A`. Read the JSONL mirror instead. Only 13/16 CLI store IDs had JSONL mirrors.
 - `--continue` (= `--resume=-1`) and `--resume <chatId>` reuse the same `sessionId`, update `store.db`/`meta.json` in place, and **rewrite** the JSONL with the whole conversation plus a single trailing `turn_ended` (IDE threads instead accumulate one `turn_ended` per turn).
 - Older session dirs may have `store.db` with no `meta.json`, and may carry `-wal`/`-shm` siblings.
-- CLI subcommands `ls` ("Resume a chat session"), `resume`, and `create-chat` exist but are omitted from `agent --help`; `ls`/`resume` are Ink TUIs that hang under piped stdin with "Raw mode is not supported". `agent about --format json` and `agent status --format json` are the machine-readable surfaces.
+- Current help visibly lists `create-chat`, `ls`, `resume`, and `persist list|attach|stop`; persist manages detached processes. The raw-mode hang was observed only on 2026.08.04. There is no export/history/sessions subcommand.
 
 ## Legacy model (pre-3.0)
 
@@ -212,7 +216,7 @@ Even older history: workspace `ItemTable` keys `aiService.prompts` / `aiService.
 
 ## Caveats
 
-- Verified on macOS with IDE 3.13.21 (`composerData _v: 17` current, bubbles `_v: 3`) and CLI `2026.08.04-aaa8809`. IDE data root differs by OS (macOS `~/Library/Application Support/Cursor`, Linux `~/.config/Cursor`, Windows `%APPDATA%\Cursor`); `~/.cursor` is the same everywhere unless `$XDG_CONFIG_HOME` (Linux/BSD) or `$CURSOR_CONFIG_DIR` is set.
+- Storage was verified on macOS with IDE 3.15.6 and CLI `2026.08.04-aaa8809`; current 3.19 / 2026.09.02 help/version was checked, not current live storage. The CLI root defaults to `~/.cursor`, with Linux/BSD `$XDG_CONFIG_HOME/cursor` and `$CURSOR_CONFIG_DIR` overrides.
 - `agentKv:blob` and CLI `store.db` protobufs are undecoded; readable fragments only.
 - "Chat Too Old" / "corrupted data" in the UI means the server `conversationState` token was lost in an upgrade — local text remains fully readable.
 - Cloud/background agents (`bc-*`) store only a cached title locally (`conversation-search.db`, `source='cloud-cache'`); the body is server-side.
