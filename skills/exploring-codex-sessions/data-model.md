@@ -1,6 +1,6 @@
 # Codex CLI Session Storage — Data Model
 
-Verified against codex-cli 0.153.4 on 2026-09-06: a live persistent run (15 lines, ordinals 0–14, paginated `UserMessage`/`AgentMessage` and `token_usage_record`) and exhaustive Studio/laptop corpora (2,557/1,276,753 and 2,630/907,563 physical files/lines). JSONL rollouts are canonical; SQLite stores rebuildable projections. For the prior format, see [the 0.146.0 snapshot](references/data-model-0.146.0.md).
+Verified against codex-cli 0.166.0 on 2026-10-30: a live persistent run (18 lines, ordinals 0–17, paginated `UserMessage`/`AgentMessage` and `token_usage_record`) and an exhaustive compressed/uncompressed corpus scan (5,408 physical files, 1,705,091 lines; no malformed records or decompression failures). Desktop still writes 0.164.0-alpha.11.1. JSONL rollouts are canonical; SQLite stores rebuildable projections. For the prior format, see [the 0.153.4 snapshot](references/data-model-0.153.4.md) and [the 0.146.0 snapshot](references/data-model-0.146.0.md).
 
 ## Contents
 
@@ -43,11 +43,11 @@ Other stores serve adjacent subsystems. Treat only rollouts as canonical transcr
 
 Every wrapped line: `{"timestamp": "<UTC RFC3339>", "type": T, "payload": {…}}`, with optional envelope metadata. `ordinal` is retained for legacy compatibility and emitted sequentially by current paginated writers; the bare era is the exception.
 
-From `RolloutItem` (protocol.rs, `tag="type" content="payload"`, snake_case), `T` has **eleven** source variants:
+From `RolloutItem` (history rollout payload, `tag="type" content="payload"`, snake_case), `T` has **thirteen** source variants:
 
-`session_meta | response_item | turn_context | world_state | compacted | event_msg | inter_agent_communication | inter_agent_communication_metadata | token_usage_record | security_risk_score | realtime_item`
+`session_meta | response_item | turn_context | world_state | compacted | event_msg | inter_agent_communication | inter_agent_communication_metadata | token_usage_record | security_risk_score | realtime_item | retained_context | dynamic_tools_updated`
 
-Wrapped corpora observe `session_meta`, `response_item`, `turn_context`, `world_state`, `compacted`, `event_msg`, `inter_agent_communication_metadata`, and `token_usage_record`; plain inter-agent, security-score, and realtime variants are source-only/unobserved. Historical `ghost_snapshot` is ignored/stripped by current readers.
+The current corpus observes `session_meta`, `response_item`, `turn_context`, `world_state`, `compacted`, `event_msg`, `inter_agent_communication_metadata`, and `token_usage_record`; plain inter-agent, security-score, realtime, retained-context, and dynamic-tools variants are source-only/unobserved. Historical `ghost_snapshot` is ignored/stripped by current readers.
 
 The following examples and persistence counts in this legacy section describe the historical 0.146 corpus; use the current pagination section below for current writers.
 
@@ -75,9 +75,10 @@ Live 0.146.0 `codex exec` example (non-git cwd, so no `git` block):
   "context_window":{"window_id":"019fe7c6-10ee-75f2-aeb2-e188a46b1e48"}}}
 ```
 
-- New vs 0.137, all defaulted or optional: `session_id` (duplicate of `id`), `history_mode`, `context_window.window_id`, `history_base`, `selected_capability_roots`, `subagent_history_start_ordinal`. **No field was removed or renamed.**
+- New vs 0.137, all defaulted or optional: `session_id` (the root thread ID; it can differ from `id` for forks and child threads), `history_mode`, `context_window.window_id`, `history_base`, `selected_capability_roots`, `subagent_history_start_ordinal`. **No field was removed or renamed.** A revert can instead make the rollout filename UUID differ from the stable payload `id`.
 - `git:{commit_hash, branch, repository_url}` present when cwd is a git repo (1475 / 2013 metas).
 - Other optional fields seen on disk: `forked_from_id`, `parent_thread_id`, `agent_nickname`, `agent_role`, `agent_path`, `dynamic_tools`, `memory_mode`, `multi_agent_version`. Pre-2026 files carry `instructions` instead of `base_instructions`.
+- Current observed metadata also includes `creator_user_id`, `creator_account_id`, and `runtime_workspace_roots`; `attached_thread` is source-supported but unobserved in this corpus.
 - `source` (`SessionSource`): `"cli"`, `"vscode"` (the serde default), `"exec"`, `"mcp"`, `{"custom": …}`, `{"internal": …}`, `"unknown"`, or subagent objects `{"subagent":{"thread_spawn":{parent_thread_id, depth, agent_path, agent_nickname, agent_role}}}` — also `review`, `compact`, `memory_consolidation`, `{"other": …}`. Observed: `vscode` 972, `subagent/thread_spawn` 513, `subagent/other` 412, `cli` 109, `exec` 1.
 - `thread_source` (`ThreadSource`): `user` | `subagent` | `guardian_review` | `{"feature": …}` | `memory_consolidation`.
 - `originator` is a free string set by the host, **not** limited to CLI values. Observed: `Codex Desktop` 1879, `codex_cli_rs` 108, `codex-tui` 26, `codex_work_desktop` 3, `codex_exec` 1.
@@ -96,11 +97,13 @@ The model-visible conversation. Persisted `payload.type` values (source: `should
 | `agent_message` (1759) | multi-agent delivery: `id`, `author`, `recipient` (agent paths like `/root`), `content[]`, `internal_chat_message_metadata_passthrough` |
 | `web_search_call` (608) | tool-specific |
 | `tool_search_call` (198) / `tool_search_output` (198) | skill/tool discovery. Note the output tag is `tool_search_output`, not `…_call_output` |
-| `local_shell_call`, `image_generation_call`, `compaction`, `context_compaction` | persisted by policy; not observed on this host |
+| `additional_tools` (203), `compaction` (654), `configuration_update`, `local_shell_call`, `image_generation_call`, `context_compaction` | persisted by policy; `additional_tools` and `compaction` were observed; the others are source-only here |
 
-Not persisted: `additional_tools`, `compaction_trigger`, `other`.
+Not persisted: `compaction_trigger`, `other`.
 
 `content[]` block types actually present: `input_text` 118522, `output_text` 22996, `encrypted_content` 1261, `input_image` 83.
+
+Current `CommandExecution` items add `sandbox_type` and `model_context`; older corpus records can still carry `stdout`, `stderr`, and `formatted_output`, which were removed from the current struct. Preserve the corpus union when reading historical rollouts.
 
 **Injected context warning**: harness context arrives as `role:"user"` *and* `role:"developer"` messages. Skipping only the classic markers is no longer enough. Markers seen on disk, by number of files containing them:
 
@@ -154,9 +157,9 @@ Current `TurnItem` source variants (19) include observed `AgentMessage`, `Collab
 
 ## Current pagination and token records
 
-`token_usage_record` has `thread_id`, `turn_id`, `session_id`, `root_turn_id`, `response_id`, `usage`, `turn_token_usage`, and `thread_token_usage`. Current `session_meta` can add `forked_from_ordinal_exclusive`; paginated forks use `history_base` lineage/cutoff rather than copied parent lines.
+`token_usage_record` has `thread_id`, `turn_id`, `session_id`, `root_turn_id`, `response_id`, `usage`, `turn_token_usage`, and `thread_token_usage`. Current `session_meta` can add `forked_from_ordinal_exclusive`; paginated forks use `history_base:{thread_id,end_ordinal_exclusive,end_byte_offset}` to identify the parent prefix and exclusive cutoff rather than copied parent lines.
 
-Current `turn_context` can add `root_turn_id`, `active_permission_profile`, `network`, and `cyber_access_program`, alongside the corpus-observed permission and collaboration fields. `compacted` can add `replacement_history_metadata`, `guardian_history`, `mcp_resource_origins`, `compaction_response_id`, and `latest_token_usage_record`.
+Current `turn_context` can add `root_turn_id`, `active_permission_profile`, `network`, `cyber_access_program`, `disabled_plugin_ids`, and `file_system_sandbox_policy`, alongside the corpus-observed permission and collaboration fields. `compacted` can add `replacement_history_metadata`, `guardian_history`, `mcp_resource_origins`, `compaction_response_id`, `latest_token_usage_record`, `retained_context`, and `resume_metadata`.
 
 ## turn_context, world_state, compacted
 
@@ -176,7 +179,7 @@ Current `turn_context` can add `root_turn_id`, `active_permission_profile`, `net
 
 `world_state` (**new type**): `{"full": bool, "state": {…}}`. `full:true` establishes a baseline snapshot; `full:false` is a patch carrying only changed keys. Baseline `state` keys observed: `agents_md`, `apps_instructions`, `collaboration_mode`, `environments`, `environments_instructions`, `git_attribution`, `host_skills`, `model`, `multi_agent_mode`, `permissions`, `personality`, `plugins_instructions`, `realtime`, `skills`. Not part of the human conversation — skip it when building transcripts.
 
-`compacted`: `{"message":"…","replacement_history":[<ResponseItem>…]}` — on replay, `replacement_history` substitutes everything before it. Added since 0.137: `window_number`, `window_id`, `first_window_id`, `previous_window_id`, which chain successive context windows.
+`compacted`: `{"message":"…","replacement_history":[<ResponseItem>…]}` — on replay, `replacement_history` substitutes everything before it. Current records can also carry `retained_context` and `resume_metadata`. Added since 0.137: `window_number`, `window_id`, `first_window_id`, `previous_window_id`, which chain successive context windows.
 
 `inter_agent_communication_metadata`: `{"trigger_turn": bool}`, paired with the `response_item`/`agent_message` that carries the actual cross-agent payload.
 
@@ -192,13 +195,13 @@ Only user prompts, all sessions interleaved, append-only, `ts` in unix **seconds
 
 ## state_5.sqlite
 
-`threads` now has 38 columns, including `project_id`; older databases have 37. The original columns are `id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path, created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms, history_mode, name, is_pinned, thread_section_id, section_position, section_entered_at_ms`.
+The observed desktop `threads` table has 42 columns: `id, rollout_path, created_at, updated_at, source, model_provider, cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at, git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname, agent_role, memory_mode, model, reasoning_effort, agent_path, created_at_ms, updated_at_ms, thread_source, preview, recency_at, recency_at_ms, history_mode, name, is_pinned, thread_section_id, section_position, section_entered_at_ms, project_id, originator, daybreak_enabled, creator_user_id, creator_account_id`. Source also defines `attached_thread_parent_id`; it was not present in this observed desktop database.
 
 New since 0.137: `recency_at`, `recency_at_ms`, `history_mode`, `name` (thread name, also in `session_index.jsonl`), `is_pinned`, `thread_section_id`, `section_position`, `section_entered_at_ms`. `sandbox_policy` stores serialized JSON, not a bare string. `first_user_message`/`preview` may contain an injected block rather than human text for guardian and subagent threads.
 
 Other tables: `thread_spawn_edges(parent_thread_id, child_thread_id, status)` maps parent/child subagent threads (`status` ∈ `open`/`closed`); `thread_sections` includes `id`, `name`, and `appearance`; `thread_dynamic_tools`, `backfill_state`, `external_agent_config_imports`, `remote_control_enrollments`, `_sqlx_migrations` support unrelated subsystems. Rollout JSONL is canonical for transcript content, while `threads.rollout_path` is operationally authoritative for selecting the current generation after revert.
 
-Current metadata also includes `rollout_migration_state`, `rollout_migration_skipped_rollouts`, `projects`, `project_roots`, `project_idempotency_keys`, and `thread_artifacts`. `thread_history_1.sqlite` projects `thread_turns`, `thread_items`, `thread_history_projection_state`, and `thread_realtime_items`; `queue_1.sqlite` has `queued_items` and `queued_thread_revisions`. Queue tables are mutable live state.
+Current metadata also includes `rollout_migration_state`, `rollout_migration_skipped_rollouts`, `projects`, `project_roots`, `project_idempotency_keys`, `thread_attachments`, `guardian_review_feedback`, and `thread_read_receipts`. `thread_attachments` replaces the older `thread_artifacts`; its `attachment_type` column replaces `artifact_type`. `thread_history_1.sqlite` projects `thread_turns`, `thread_items`, `thread_history_projection_state`, and `thread_realtime_items`; `queue_1.sqlite` has `queued_items` and `queued_thread_revisions`. Queue tables are mutable live state.
 
 ## Format eras (2025–2026)
 

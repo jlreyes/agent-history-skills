@@ -1,6 +1,6 @@
 # agent-history-skills
 
-[Agent skills](https://agentskills.io) for finding, searching, reading, and exporting the conversation history that AI coding agents store on your machine.
+[Agent skills](https://agentskills.io) for finding, searching, reading, and exporting the conversation history that AI coding agents store on your machine. When the host exposes a native thread or session API, use that read-only interface first; use the local storage formats when native retrieval cannot reach the target, is incomplete for the question, or is explicitly requested.
 
 | Skill | Agent | Where the history lives |
 |-------|-------|------------------------|
@@ -8,7 +8,7 @@
 | [`exploring-codex-sessions`](skills/exploring-codex-sessions/SKILL.md) | OpenAI Codex CLI | JSONL rollouts in `~/.codex/sessions/` |
 | [`exploring-cursor-history`](skills/exploring-cursor-history/SKILL.md) | Cursor IDE | SQLite databases in `~/Library/Application Support/Cursor/` |
 
-Each skill teaches an agent how to locate session files, decode the storage schema, and run verified recipes: list recent sessions, search across all history by keyword, dump a full transcript as readable markdown, and resume a found session.
+Each skill teaches an agent how to choose the best available reader, then locate session files, decode the storage schema, and run verified fallback recipes: list recent sessions, search across all history by keyword, dump a full transcript as readable markdown, and resume a found session.
 
 Typical uses: "what did I ask Cursor to do in that session last week?", auditing an agent's past work, exporting a transcript for review, or building tooling on top of local agent history.
 

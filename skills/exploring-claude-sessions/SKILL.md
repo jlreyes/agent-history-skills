@@ -1,6 +1,6 @@
 ---
 name: exploring-claude-sessions
-description: Finds and explores Claude Code session history stored locally as JSONL transcripts. Use when the user asks to find, search, read, export, or resume a past Claude Code session, conversation, or transcript, or to see what a previous Claude Code session did.
+description: Finds and explores Claude Code session history. Use native read-only session APIs first when available; use local JSONL transcripts when native retrieval cannot reach the target, is incomplete, or raw storage is explicitly requested. Use when the user asks to find, search, read, export, or resume a past Claude Code session, conversation, or transcript, or to see what a previous Claude Code session did.
 compatibility: Requires jq. Paths are macOS/Linux.
 allowed-tools: Bash(jq *) Bash(ls *) Bash(grep *) Bash(find *) Bash(basename *) Bash(sort *) Bash(tail *) Bash(claude *)
 metadata:
@@ -9,7 +9,9 @@ metadata:
 
 # Exploring Claude Code Sessions
 
-Set `CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`. Claude Code stores each session as JSONL under `$CLAUDE_ROOT/projects/`. The usual project slug is the cwd with `/` changed to `-`; if `CLAUDE_CODE_PROJECT_DIR_NAME` is set or uncertain, list/search `$CLAUDE_ROOT/projects` instead—it cannot be derived before finding the transcript.
+Use the narrowest read-only capability that answers the request. When the host offers Claude's native session API, use `listSessions`, `getSessionInfo`, and paginated `getSessionMessages` first. Newer API versions may support `includeSystemMessages`; feature-detect it and request those messages only when they are relevant. Hosts need not expose these capabilities or the same result depth.
+
+Use raw storage when native retrieval cannot reach the target or does not contain the needed content, or when the user explicitly asks for raw storage-level detail. Do not use `--resume` merely to inspect a session. Set `CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`. Claude Code stores each session as JSONL under `$CLAUDE_ROOT/projects/`. The project slug replaces non-alphanumeric cwd characters with `-` (and can be truncated with a hash); if `CLAUDE_CODE_PROJECT_DIR_NAME` is set or uncertain, list/search `$CLAUDE_ROOT/projects` instead—it cannot be derived before finding the transcript.
 
 ## Storage locations
 
@@ -26,13 +28,13 @@ Set `CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"`. Claude Code stores each
 | `$CLAUDE_ROOT/file-history/<session-id>/<hash>@v<N>` | File snapshots backing checkpoint/undo |
 | `$CLAUDE_ROOT/sessions/<pid>.json` | Live registry of *running* sessions: `{pid, sessionId, cwd, version, kind, entrypoint, name, status, …}` |
 
-**Project slug encoding**: the session's working directory with `/` replaced by `-`. `/Users/me/repos/Foo` → `-Users-me-repos-Foo`.
+**Project slug encoding**: every non-alphanumeric path character is replaced by `-`; slugs longer than 200 characters are truncated and suffixed with a hash. `/Users/me/repos/Foo` → `-Users-me-repos-Foo`.
 
-**Retention**: CLI transcripts are auto-cleaned after 30 days by default (`cleanupPeriodDays` in `$CLAUDE_ROOT/settings.json`; minimum 1). A session's `subagents/` and `tool-results/` age out with it. `history.jsonl` is never auto-cleaned. Claude Desktop has a separate retention exemption since 2.1.248, controlled by `desktopSessionCleanupPeriodDays`; this skill remains CLI-scoped. `claude project purge [path]` deletes one project's transcripts, memory, tasks, file-history and `history.jsonl` lines.
+**Retention**: CLI transcripts are auto-cleaned after 30 days by default (`cleanupPeriodDays` in `$CLAUDE_ROOT/settings.json`; minimum 1). A session's `subagents/` and `tool-results/` age out with it. `history.jsonl` is never auto-cleaned. Claude Desktop has a separate retention exemption since 2.1.248, controlled by `desktopSessionCleanupPeriodDays`; this skill remains CLI-scoped. `claude purge [path]` deletes one project's transcripts, memory, tasks, file-history and `history.jsonl` lines (`claude project purge` remains an alias).
 
 ## Transcript schema (quick reference)
 
-Entry types per line: `user`, `assistant`, `attachment`, `system`, `mode`, `permission-mode`, `ai-title`, `custom-title`, `last-prompt`, `queue-operation`, `file-history-snapshot`, `file-history-delta`, `pr-link`, `bridge-session`, `relocated`, `worktree-state`, `agent-name`, `agent-setting`, `frame-link`, `summary`, `atis-latch`, `history-suppression`, `artifact-autoreact-ledger`, `artifact-comment-monitor`. Full field tables and examples: [data-model.md](data-model.md). `started` and `result` are journal-only lifecycle records.
+Entry types per line: `user`, `assistant`, `attachment`, `system`, `mode`, `permission-mode`, `ai-title`, `custom-title`, `last-prompt`, `queue-operation`, `file-history-snapshot`, `file-history-delta`, `pr-link`, `bridge-session`, `relocated`, `worktree-state`, `agent-name`, `agent-setting`, `frame-link`, `summary`, `atis-latch`, `history-suppression`, `artifact-autoreact-ledger`, `artifact-comment-monitor`, `cost-state`. Full field tables and examples: [data-model.md](data-model.md). `started` and `result` are journal-only lifecycle records.
 
 The fields needed for most exploration:
 
@@ -103,7 +105,7 @@ jq -r '
 ' "$PROJ/<session-id>.jsonl"
 ```
 
-Same command works on `<session-id>/subagents/agent-*.jsonl`.
+Same command works on `<session-id>/subagents/agent-*.jsonl`. This dumps physical `user`/`assistant` records in file order; it does not select a `parentUuid` branch or reproduce resumed context after compaction. Prefer native `getSessionMessages` for the selected conversation chain. For injected prompt context, inspect `attachment` and `system` records in [data-model.md](data-model.md).
 
 ### Find which session touched a file
 
