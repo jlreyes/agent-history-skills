@@ -1,6 +1,6 @@
 # Claude Code Session Storage — Data Model
 
-Verified on 2026-09-06 against the official 2.1.263 binary/help, an authoritative laptop writer at 2.1.240, and 218,064 valid lines (1,533 JSONL files plus 78 legacy backups). Current 2.1.263 live-write validation did not complete.
+Verified on 2026-10-30 against the official 2.1.314 binary/help, SDK 0.2.81 native session reads, and 105,714 valid lines across 750 JSONL files (no malformed lines). A 2.1.314 fresh startup/error write produced 14 records, but OAuth expiry prevented a successful current-model response; source-supported request-capture records are identified below.
 
 Everything documented here is additive over the older shape: `1.0.x` transcripts on disk still carry the same `user`/`assistant` + `message.content` + `uuid`/`parentUuid` core, so old transcripts remain a valid subset. There is no archived prior revision.
 
@@ -18,7 +18,7 @@ Everything documented here is additive over the older shape: `1.0.x` transcripts
 ```
 CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"  # transcript-relevant subset
 ├── projects/
-│   └── -Users-me-repos-Foo/                  # cwd with "/" → "-"
+│   └── -Users-me-repos-Foo/                  # non-alphanumeric cwd chars → "-"
 │       ├── <session-id>.jsonl                # main transcript
 │       ├── <session-id>/
 │       │   ├── subagents/
@@ -37,7 +37,7 @@ CLAUDE_ROOT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"  # transcript-relevant subset
 └── settings.json                             # cleanupPeriodDays lives here
 ```
 
-`.session-aliases` is **not** a name→session-ID map. It is an append-only, deduplicated list of absolute `~/.claude/projects/<slug>` directory paths, written by the CLI's `recordSessionAlias` when a directory's real path maps to a different project slug than the literal cwd does (symlinks, relocated checkouts). Use it to find sibling directories that may hold the transcript you want.
+`.session-aliases` is **not** a name→session-ID map. It is an append-only, deduplicated list of absolute `~/.claude/projects/<slug>` directory paths, written by the CLI's `recordSessionAlias` when a directory's real path maps to a different project slug than the literal cwd does (symlinks, relocated checkouts). A slug replaces every non-alphanumeric path character with `-`; names over 200 characters are truncated and suffixed with a hash. Use aliases to find sibling directories that may hold the transcript you want.
 
 ## Transcript entry types
 
@@ -138,9 +138,23 @@ Each line is a standalone JSON object discriminated by `.type`.
 
 Observed `attachment.type` values include `hook_success`, `task_reminder`, `queued_command`, `hook_additional_context`, `edited_text_file`, `deferred_tools_delta`, `skill_listing`, `mcp_instructions_delta`, `command_permissions`, `agent_listing_delta`, `nested_memory`, `hook_system_message`, `date_change`, `goal_status`, `plan_mode`, `plan_mode_exit`, `plan_mode_reentry`, `read_truncation_notice`, `auto_mode`, `hook_cancelled`, `async_hook_response`, `hook_non_blocking_error`, `hook_permission_decision`, `budget_usd`, `ultrathink_effort`, `max_turns_reached`, `bash_output_audience_note`, `compact_file_reference`, `file`, `invoked_skills`, `silent_turn_reminder`, `task_status`, and `total_tokens_reminder`.
 
+Additional observed context attachments include `prompt_snapshot`, `instructions`, `session_context`, `environment`, `model`, and `deferred_tools_record`. `prompt_snapshot` can record `systemPrompt`, `tools`, `systemTurns`, `inlineTools`, and context-rendering metadata; `instructions.files`, `session_context.context`, and `environment.snapshot` hold other injected context. Attachment entries can carry rendered text in top-level `rendered`/`renderedInHumanTurn`; the fresh 2.1.314 startup write also recorded top-level `renderedRole`.
+
 Observed `system.subtype` values: `turn_duration` (`durationMs`, `messageCount`), `stop_hook_summary` (`hookCount`, `hookErrors`, `preventedContinuation`, …), `away_summary`, `local_command`, `model_refusal_fallback` (`originalModel`, `fallbackModel`, `apiRefusalCategory`), `informational`, `agents_killed`, `scheduled_task_fire`, and `compact_boundary` (with `compactMetadata`).
 
-Current observed metadata types also include `atis-latch`, `history-suppression`, `artifact-autoreact-ledger`, and `artifact-comment-monitor`. `history-suppression` may record `migration` or `restored_owner_mismatch`. `started` and `result` occur only in `subagents/journal.jsonl`, not in transcript conversations. Treat any unrecognized `.type` as skippable — the conversation lives entirely in `user`/`assistant`.
+Current observed metadata types also include `atis-latch`, `history-suppression`, `artifact-autoreact-ledger`, `artifact-comment-monitor`, and `cost-state`. `cost-state` can carry `hasUnknownModelCost`, `modelUsage`, `sessionId`, `startTime`, total durations, token/cost totals, and line-change totals. `history-suppression` may record `migration` or `restored_owner_mismatch`. `started` and `result` occur only in `subagents/journal.jsonl`, not in transcript conversations. `user` and `assistant` hold the human-readable conversation core; inspect attachment and system metadata when the underlying injected context is the question.
+
+## Source-supported request capture
+
+Claude Code 2.1.314 can write `api-request-shape`, `api-request-blob`, and
+`api-request` entries. They record request shapes, hashed message references,
+and request metadata; a request can refer to a prior `base` plus `keep`/`tail`
+hashes rather than contain a standalone body. Shapes can contain `system` and
+`tools`, while `api-request.withheld` identifies omitted injected-body parameter names.
+This capture is conditional, so its absence does not prove there was no model
+call, and it is not guaranteed to be a complete unredacted request. It is
+source-supported for 2.1.314 but was not observed in this corpus or in the
+fresh run blocked by OAuth expiry.
 
 ## Common fields
 
@@ -151,7 +165,7 @@ Current observed metadata types also include `atis-latch`, `history-suppression`
 | `session_id` | user, assistant, system | Snake-case duplicate of `sessionId` on newer lines |
 | `timestamp` | most | ISO 8601 UTC |
 | `cwd`, `gitBranch` | user, assistant, system | Working dir and branch at that moment |
-| `entrypoint` | user, assistant, system | Observed: `cli`, `sdk-cli`. `claude -p` writes `sdk-cli`; the SDKs write `sdk-ts` / `sdk-py` |
+| `entrypoint` | user, assistant, system | Observed: `cli`, `claude-desktop`, `sdk-cli`. `claude -p` writes `sdk-cli`; the SDKs write `sdk-ts` / `sdk-py` |
 | `version` | user, assistant, system | Claude Code version that wrote the line |
 | `isSidechain` | user, assistant | `true` on subagent/sidechain work |
 | `userType` | user, assistant, system | `external` on every entry observed |
@@ -161,6 +175,8 @@ Current observed metadata types also include `atis-latch`, `history-suppression`
 | `sessionKind` | user, assistant | e.g. `bg` (background agent); `daemon`/`daemon-worker` are hidden from `/resume` |
 | `isMeta` | user, system | `true` on injected/harness content rather than real conversation |
 | `effort` | assistant | Reasoning effort (`low`…`max`), recorded per message since 2.1.212; absent on `<synthetic>` lines |
+| `perTurnEffort` | assistant | Additional recorded effort metadata |
+| `queueSkipAttachments`, `queueTranscriptOnly`, `turnOrigin`, `turnPosition` | user | Queue/turn metadata observed in current records |
 | `toolUseResult`, `sourceToolAssistantUUID`, `sourceToolUseID` | user | Structured tool result and back-pointer to the calling `assistant` entry |
 | `toolDenialKind` | user | `user-rejected`, `permission-rule`, `automode-blocked`, `automode-unavailable`, `interrupted` |
 
@@ -183,10 +199,12 @@ One line per prompt typed, across all projects:
 
 `timestamp` is epoch **milliseconds**; `project` is the real path (not the slug). `sessionId` was added mid-2.1.x, so older lines lack it. Only prompts the user actually typed land here — SDK/headless prompts do not. Useful as a fast cross-project index that now links straight to a transcript.
 
+Check `history.jsonl` freshness before treating it as complete: on the 2026-10-30 Studio audit, its last append was 2026-08-21 despite newer transcripts. Fall back to transcript search when it lags.
+
 ## Retention and lifecycle
 
 - Transcripts auto-clean after `cleanupPeriodDays` (default 30, minimum 1) — recoverable history is bounded; a session's `subagents/` and `tool-results/` age out with it. `history.jsonl`, `stats-cache.json` and other "kept until you delete them" paths persist indefinitely.
-- `claude project purge [path]` deletes one project's transcripts, memory, `tasks/`, `debug/`, `file-history/`, its `history.jsonl` lines, and its `~/.claude.json` entry (`--dry-run`, `--yes`, `--all`, `-i`).
+- `claude purge [path]` deletes one project's transcripts, memory, `tasks/`, `debug/`, `file-history/`, its `history.jsonl` lines, and its `~/.claude.json` entry (`claude project purge` remains an alias; `--dry-run`, `--yes`, `--all`, `-i`).
 - `CLAUDE_CODE_SKIP_PROMPT_HISTORY=1` skips writing transcripts and prompt history entirely; `--no-session-persistence` does the same for a single `-p` run.
 - `claude --resume <id|title>` / `--continue` reopen sessions. `--fork-session` creates a new session, then requires resume/continue. `--from-pr` accepts a PR number or URL, or opens a picker. `/compact` writes a `summary` entry; `/export` accepts an optional filename or copies to the clipboard.
 - `/resume` hides sessions with `isSidechain: true`, a `teamName`, `sessionKind` of `daemon`/`daemon-worker`, `/loop` sessions, and any `entrypoint` in `sdk-cli`/`sdk-ts`/`sdk-py`. They are all still on disk — read them directly.
